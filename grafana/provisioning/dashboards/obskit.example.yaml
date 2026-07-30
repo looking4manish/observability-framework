@@ -1,0 +1,15 @@
+# obskit -> Grafana: dashboard provider (file-based provisioning).
+# Copy to <grafana provisioning dir>/dashboards/ and place the dashboard JSON
+# from ../../dashboards/ into the path below, then reload Grafana.
+apiVersion: 1
+providers:
+  - name: obskit
+    orgId: 1
+    folder: obskit
+    type: file
+    disableDeletion: false
+    updateIntervalSeconds: 30
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards/obskit   # adjust to where you copy the JSON
+      foldersFromFilesStructure: false

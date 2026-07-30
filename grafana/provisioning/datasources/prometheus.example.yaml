@@ -1,0 +1,17 @@
+# obskit -> Grafana: Prometheus datasource (file-based provisioning).
+# Copy to <grafana provisioning dir>/datasources/ and reload Grafana.
+# The obskit dashboards reference a $datasource template variable, so they bind
+# to whichever Prometheus datasource you select; isDefault:true makes this one
+# the default so they work out of the box.
+apiVersion: 1
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://127.0.0.1:9095   # adjust to your Prometheus address
+    isDefault: true
+    editable: false
+    jsonData:
+      httpMethod: POST
+      timeInterval: 15s          # match your Prometheus scrape_interval
