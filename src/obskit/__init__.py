@@ -28,16 +28,17 @@ Service identity is required. There are no defaults — see ServiceIdentityError
 from .semconv import (SEMCONV_SCHEMA_URL, SEMCONV_VERSION, App, GenAI,
                       GenAIOperation, Langfuse, ObservationLevel, ObservationType,
                       verify_against_upstream)
+from .logs import JsonFormatter, get_logger, setup_logging
 from .redaction import scrub, scrub_text
 from .tracing import (NULL_SPAN, ServiceIdentityError, adopt_root, bind_request,
-                      current_trace_id, degradations, embedding, enabled,
+                      current_span_ids, current_trace_id, degradations, embedding, enabled,
                       end_root_span, flush, generation, init, init_error,
                       mark_degraded_from_request, new_request_id, record_degradation,
                       record_generation, redact_messages, request_id, reset_for_tests,
-                      session_id, set_context_state, shutdown, span, start_root_span,
-                      status, tenant_id, tool_span, user_id)
+                      service_identity, session_id, set_context_state, shutdown, span,
+                      start_root_span, status, tenant_id, tool_span, user_id)
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 
 def langfuse_endpoint(host: str, public_key: str, secret_key: str) -> dict:
@@ -65,6 +66,8 @@ __all__ = [
     "verify_against_upstream",
     # redaction
     "scrub", "scrub_text",
+    # structured logging (opt-in; init() never configures logging for you)
+    "setup_logging", "JsonFormatter", "get_logger",
     # lifecycle
     "init", "shutdown", "flush", "status", "enabled", "init_error",
     "ServiceIdentityError", "reset_for_tests",
@@ -73,7 +76,8 @@ __all__ = [
     "tenant_id",
     # spans
     "span", "generation", "embedding", "tool_span", "start_root_span",
-    "adopt_root", "end_root_span", "current_trace_id", "NULL_SPAN",
+    "adopt_root", "end_root_span", "current_trace_id", "current_span_ids",
+    "service_identity", "NULL_SPAN",
     # degradation
     "record_degradation", "degradations", "mark_degraded_from_request",
     "set_context_state",

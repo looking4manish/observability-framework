@@ -164,10 +164,10 @@ def test_tenant_absent_when_not_bound(exporter):
 
 def test_redaction_applied_in_attribute_path(exporter):
     with obskit.span("db") as sp:
-        sp.set_attribute("lab.db.uri", "mongodb://admin:Changeme001@oci-p:27017/x")
+        sp.set_attribute("lab.db.uri", "mongodb://admin:n0tArealPassw0rd@oci-p:27017/x")
         sp.set_input({"conn": "postgres://u:p4ss@pg:5432/d"})
     a = exporter.get_finished_spans()[0].attributes
-    assert "Changeme001" not in a["lab.db.uri"]
+    assert "n0tArealPassw0rd" not in a["lab.db.uri"]
     assert "oci-p:27017" in a["lab.db.uri"]
     assert "p4ss" not in a[obskit.Langfuse.OBSERVATION_INPUT]
 

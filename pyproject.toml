@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "observability-framework"
-version = "0.1.0"
+version = "0.2.0"
 description = "OpenTelemetry span-tree tracing for LLM applications, exported to Langfuse"
 readme = "README.md"
 requires-python = ">=3.10"

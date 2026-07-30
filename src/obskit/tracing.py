@@ -67,6 +67,7 @@ _init_error: str | None = None
 _endpoint: str | None = None   # resolved OTLP URL, surfaced by status()
 _service_name: str | None = None
 _service_namespace: str | None = None
+_service_version: str | None = None
 _environment: str | None = None
 _tracer_name: str | None = None
 
@@ -241,6 +242,7 @@ def status() -> dict:
         "endpoint": _endpoint,
         "service": _service_name,
         "service_namespace": _service_namespace,
+        "service_version": _service_version,
         "environment": _environment,
         "semconv_version": SEMCONV_VERSION,
         "error": _init_error,
@@ -299,6 +301,7 @@ def init(*, enabled_flag: bool,
     """
     global _provider, _tracer, _enabled, _init_error, _endpoint
     global _service_name, _service_namespace, _environment, _tracer_name
+    global _service_version
 
     # Validated BEFORE the enabled_flag short-circuit, on purpose: a misconfigured
     # service identity is a deployment bug, and it must surface whether or not
@@ -311,6 +314,7 @@ def init(*, enabled_flag: bool,
         return {"status": "already-initialized", "enabled": _enabled}
 
     _service_name, _service_namespace, _environment = svc, ns, env
+    _service_version = service_version
     _tracer_name = tracer_name or svc
 
     if not enabled_flag:
@@ -375,10 +379,12 @@ def reset_for_tests() -> None:
     """Drop module state so a test can init() again. Not for production use."""
     global _provider, _tracer, _enabled, _init_error, _endpoint
     global _service_name, _service_namespace, _environment, _tracer_name
+    global _service_version
     _provider = _tracer = None
     _enabled = False
     _init_error = _endpoint = None
     _service_name = _service_namespace = _environment = _tracer_name = None
+    _service_version = None
     for v in (_request_id_var, _user_id_var, _session_id_var, _tenant_id_var,
               _root_span_var, _parent_span_var, _degraded_var):
         try:
@@ -934,6 +940,27 @@ def end_root_span(handle=None, *, output=None, error: str | None = None) -> None
             _parent_span_var.set(None)
         except Exception:  # noqa: BLE001
             pass
+
+
+def service_identity() -> dict:
+    """Whatever init() was given, for anything that needs to stamp it (e.g. logs)."""
+    return {"service_name": _service_name, "service_namespace": _service_namespace,
+            "service_version": _service_version, "deployment_environment": _environment}
+
+
+def current_span_ids() -> tuple[str | None, str | None]:
+    """(trace_id, span_id) of the INNERMOST live span, else the request root.
+
+    Innermost first on purpose: a log line emitted inside `with span("rerank")`
+    should carry the rerank span's id, not the turn root's, so a reader lands on
+    the exact span. Both spans share a trace id either way. Formats are the OTel
+    canonical hex — 32 chars for trace, 16 for span — which is what the trace
+    backend displays, so a value copied out of a log line pastes straight in.
+    """
+    h = _parent_span_var.get() or _root_span_var.get()
+    if h is None or h is NULL_SPAN:
+        return None, None
+    return getattr(h, "trace_id", None), getattr(h, "span_id", None)
 
 
 def current_trace_id() -> str | None:

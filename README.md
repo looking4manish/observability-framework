@@ -108,6 +108,68 @@ also on the hot path, so a cheap substring pre-filter short-circuits the common
 case (a model name, a number, a label) before any regex runs. And it never
 raises — a redaction bug must not take down the request path.
 
+## Structured logging
+
+A span tells you THAT something failed; the error text lives in a log line. With
+no shared key there is no way to get from one to the other. `setup_logging()`
+emits one JSON object per line to stdout, and every record automatically carries
+the same ids the spans carry.
+
+```python
+obskit.setup_logging(level="INFO")           # after init(), before serving
+logging.getLogger("myapp").info("started")   # callsites do not change
+```
+
+```json
+{"timestamp":"2026-07-30T13:19:12.459+00:00","level":"INFO","logger":"myapp",
+ "message":"started","request_id":"3f31...","trace_id":"18686637887a03fe0322b15a9ac22006",
+ "span_id":"94d72f178a82c2c3","tenant_id":"acme","user_id":"u1","session_id":"s1",
+ "service":{"name":"my-api","namespace":"lab","version":"1.4.0","environment":"prod"}}
+```
+
+**Automatic means automatic.** `request_id`, `trace_id`, `span_id`, `tenant_id`,
+`user_id` and `session_id` are read from the same contextvars `bind_request()`
+and the span helpers already populate. Callsites keep writing plain
+`log.info(...)`. Service identity comes from what you gave `init()`.
+
+**The ids are the join.** `trace_id` is 32 lowercase hex, `span_id` is 16 — the
+OTel canonical form, which is exactly what Langfuse displays. Copy either out of
+a log line, paste it into the trace UI, land on the right span. `span_id` is the
+**innermost** live span, not the request root, so a line logged inside
+`with span("rerank")` points at the rerank span.
+
+**Fields are omitted, not null, when unbound.** A line from startup or a
+background task simply has no `request_id`. A null would imply one was expected.
+
+**Redaction is the same one.** Messages, `extra=` fields, exception text and
+stack traces all go through `redaction.scrub` — the function that scrubs span
+attributes. There is no second implementation to drift.
+
+**Setup is explicit and optional.** `init()` never configures logging. An
+application that wants only traces has its logging left exactly as it found it;
+reconfiguring a host application's root logger as a side effect of asking for
+traces would be a hostile default.
+
+**It attaches to the root logger**, so third-party library records become JSON
+too. That is usually what you want and occasionally surprising — OpenTelemetry's
+own warnings will appear in your log stream.
+
+**uvicorn's access logs.** uvicorn configures only `uvicorn`, `uvicorn.error` and
+`uvicorn.access`, and never touches the root logger — which is why a plain
+`log.info()` in a uvicorn-hosted app goes nowhere by default until you call
+`setup_logging()`. Those access lines **can** be brought into the same format:
+pass `capture_uvicorn=True` and their handlers are removed and they propagate to
+the JSON handler instead. It is off by default because it mutates loggers this
+package does not own. Note they will carry no `request_id` or `trace_id`: uvicorn
+emits them after the response, outside the request context.
+
+Options: `level`, `stream` (defaults to stdout), `capture_uvicorn`,
+`static_fields`, `include_source`, `replace_existing`. Returns a status dict and
+never raises — a logging misconfiguration must not stop a service starting.
+
+Logs go to **stdout only**. Shipping them over OTLP to a collector is
+deliberately out of scope.
+
 ## Attribute namespaces
 
 | Prefix | Owner | Renameable |
@@ -256,6 +318,10 @@ absorbs every method call and returns itself — so
 callsite. A dead collector, a missing SDK or an unserialisable attribute costs
 you the trace, never the request.
 
+`setup_logging()` follows the same rule: it returns `{"status": "error", ...}`
+rather than raising, and the formatter falls back to a minimal line if JSON
+encoding fails, so a bad log record cannot take down the request path.
+
 *Enforced by code, with one deliberate exception.* There is exactly one `raise`
 in the entire package — `ServiceIdentityError` in `init()` (rule 5). That is
 startup-time configuration validation, not request-path instrumentation. Once
@@ -277,10 +343,16 @@ no path to an attribute that bypasses redaction. That is the point: a per-callsi
 `scrub()` helper would be correct everywhere it was called and useless the first
 time someone forgot.
 
+As of 0.2.0 the same applies to logs: `logs.JsonFormatter` scrubs the message,
+`extra=` fields, exception text and stack traces through the same `scrub()`.
+Two output paths, one redaction implementation.
+
 *Enforced by code:* `src/obskit/redaction.py` applied at
-`src/obskit/tracing.py` (`_Span.set_attribute`, `_serialize`); covered by
-`tests/test_redaction.py` and
-`tests/test_tracing.py::test_redaction_applied_in_attribute_path`.
+`src/obskit/tracing.py` (`_Span.set_attribute`, `_serialize`) and at
+`src/obskit/logs.py` (`JsonFormatter._build`); covered by
+`tests/test_redaction.py`,
+`tests/test_tracing.py::test_redaction_applied_in_attribute_path` and
+`tests/test_logs.py::test_redaction_uses_the_shared_module`.
 
 ### 8. Declare your dependencies explicitly
 
@@ -372,10 +444,20 @@ not on intent.
    `SimpleSpanProcessor` over an in-memory exporter in tests and no network is
    touched).
 
-3. **Expose `status()` on your health endpoint** (rule 9), so a silently
+3. **Call `setup_logging()` if you want structured logs.** Optional, and
+   deliberately not done for you by `init()`. Call it after `init()` so records
+   carry service identity, and before serving so startup lines are captured:
+
+   ```python
+   obskit.setup_logging(level="INFO", capture_uvicorn=True)
+   ```
+
+   Skip it entirely and your logging is untouched.
+
+4. **Expose `status()` on your health endpoint** (rule 9), so a silently
    disabled exporter is visible without sending a request and going to look.
 
-4. **Bind identity once per request, at the outermost frame.**
+5. **Bind identity once per request, at the outermost frame.**
 
    ```python
    request_id = obskit.bind_request(user_id=uid, session_id=conv_id,
@@ -386,7 +468,7 @@ not on intent.
    returned to you. `tenant_id` lands as `lab.tenant.id` on every span in the
    request.
 
-5. **Open a root span per unit of work and close it in a `finally`.**
+6. **Open a root span per unit of work and close it in a `finally`.**
    `start_root_span()` is deliberately not a context manager, because a streaming
    response has to outlive the handler that created it.
 
@@ -405,16 +487,16 @@ not on intent.
    stack, and any middleware that runs the generator in a fresh task would
    silently orphan every child span.
 
-6. **Instrument with the span helpers, referencing `App.*` never string
+7. **Instrument with the span helpers, referencing `App.*` never string
    literals** (rule 3): `span()`, `generation()`, `embedding()`, `tool_span()`.
    Pass `provider=` explicitly on `generation()` and `embedding()` — there is no
    default, and when omitted `gen_ai.provider.name` is simply not set rather than
    set to something untrue.
 
-7. **Call `shutdown()` on process stop.** Spans are exported by a background
+8. **Call `shutdown()` on process stop.** Spans are exported by a background
    thread; without it a restart drops whatever was still queued.
 
-8. **Run the drift check in CI** (rule 9), since nothing runs it for you.
+9. **Run the drift check in CI** (rule 9), since nothing runs it for you.
 
 ## Install
 
