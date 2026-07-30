@@ -8,16 +8,16 @@ from obskit.redaction import REDACTED, scrub, scrub_text
     # connection strings: scheme + user + host survive, password does not
     ("mongodb://app:s3cretP4ss@db1.internal:27017/legion?authSource=admin",
      ["mongodb://", "app:", "db1.internal:27017", "authSource=admin"], "s3cretP4ss"),
-    ("mongodb+srv://admin:Changeme001@oci-p.mdbdemo.in/?replicaSet=rs0",
-     ["mongodb+srv://", "admin:", "oci-p.mdbdemo.in", "replicaSet=rs0"], "Changeme001"),
+    ("mongodb+srv://admin:n0tArealPassw0rd@oci-p.mdbdemo.in/?replicaSet=rs0",
+     ["mongodb+srv://", "admin:", "oci-p.mdbdemo.in", "replicaSet=rs0"], "n0tArealPassw0rd"),
     ("postgres://svc_user:hunter2@pg.internal:5432/app",
      ["postgres://", "svc_user:", "pg.internal:5432"], "hunter2"),
     ("postgresql://svc_user:hunter2@pg.internal:5432/app",
      ["postgresql://", "pg.internal:5432"], "hunter2"),
     ("mysql://root:toor@mysql.internal:3306/db",
      ["mysql://", "root:", "mysql.internal:3306"], "toor"),
-    ("redis://default:myredissecret@127.0.0.1:6379/0",
-     ["redis://", "default:", "127.0.0.1:6379"], "myredissecret"),
+    ("redis://default:n0tArealRedisPass@127.0.0.1:6379/0",
+     ["redis://", "default:", "127.0.0.1:6379"], "n0tArealRedisPass"),
 ])
 def test_connection_strings(raw, must_keep, must_drop):
     out = scrub_text(raw)
