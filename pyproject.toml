@@ -1,0 +1,54 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "observability-framework"
+version = "0.1.0"
+description = "OpenTelemetry span-tree tracing for LLM applications, exported to Langfuse"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "looking4manish" }]
+keywords = ["opentelemetry", "tracing", "observability", "langfuse", "llm", "genai"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Monitoring",
+]
+
+# Floors are what is installed and working on OCI today (1.43.0), not a guess.
+# Upper bound at <2 because the OTel Python SDK reserves major bumps for breaking
+# changes and this package calls the SDK directly (TracerProvider, Resource,
+# BatchSpanProcessor, start_span, Status/StatusCode).
+#
+# opentelemetry-semantic-conventions is deliberately NOT listed: it arrives as a
+# dependency of the SDK, and verify_against_upstream() is written to tolerate its
+# absence — that tolerance is the whole point of pinning the gen_ai.* strings as
+# literals, so hard-requiring it here would defeat it.
+dependencies = [
+    "opentelemetry-api>=1.43.0,<2",
+    "opentelemetry-sdk>=1.43.0,<2",
+]
+
+[project.optional-dependencies]
+# The OTLP/HTTP exporter is only needed to actually ship spans. Tests use an
+# in-memory exporter, and an application embedding this in a collector-less
+# environment does not need it either.
+otlp = ["opentelemetry-exporter-otlp-proto-http>=1.43.0,<2"]
+dev = [
+    "pytest>=8,<9",
+    "opentelemetry-exporter-otlp-proto-http>=1.43.0,<2",
+]
+
+[project.urls]
+Repository = "https://github.com/looking4manish/observability-framework"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/obskit"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
