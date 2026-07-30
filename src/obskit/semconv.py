@@ -77,6 +77,59 @@ class GenAIOperation:
     INVOKE_AGENT = "invoke_agent"
 
 
+class GenAIMetric:
+    """OTel GenAI *metric* names (incubating, pinned to SEMCONV_VERSION).
+
+    Re-declared as frozen literals for exactly the reason the gen_ai.* attribute
+    strings are (see module docstring): these live in
+    `opentelemetry.semconv._incubating.metrics.gen_ai_metrics`, an underscored,
+    still-incubating module upstream is free to move or rename in a patch release.
+    Importing it directly would let an SDK bump break metrics at import time.
+    `verify_against_upstream()` re-checks these against whatever is installed.
+
+    Instrument types and units are fixed by the convention: all three are
+    Histograms; duration/TTFT in seconds, token usage in `{token}`.
+    """
+
+    OPERATION_DURATION = "gen_ai.client.operation.duration"     # Histogram, s
+    TOKEN_USAGE = "gen_ai.client.token.usage"                   # Histogram, {token}
+    TIME_TO_FIRST_CHUNK = "gen_ai.client.operation.time_to_first_chunk"  # Histogram, s
+
+
+class LabMetric:
+    """Application metric names with no OTel standard. `lab.` prefix, same rule as
+    the App.* attributes: the only prefix an adopting application may rename.
+
+    OTel metric naming convention followed: dotted namespace, lowercase, no unit
+    in the name (the unit rides on the instrument), singular noun for what is
+    measured — matching the shape of the stable `http.server.request.duration`.
+    """
+
+    REQUEST_DURATION = "lab.request.duration"       # Histogram, s
+    RETRIEVAL_DURATION = "lab.retrieval.duration"   # Histogram, s
+
+
+class MetricLabel:
+    """The ONLY keys permitted as metric labels. Every one is a bounded/closed
+    set — service identity, route, model, provider, operation, outcome, token
+    type — never a per-request identifier. metrics._labels() enforces this."""
+
+    ROUTE = "lab.route"          # app route classifier output (closed set)
+    OUTCOME = "lab.outcome"      # ok | error | degraded | aborted
+    TENANT = "lab.tenant.id"     # opt-in only, allow-listed + capped
+    MODEL = "gen_ai.request.model"
+    OPERATION = "gen_ai.operation.name"
+    PROVIDER = "gen_ai.provider.name"
+    TOKEN_TYPE = "gen_ai.token.type"  # input | output
+
+
+class TokenType:
+    """Values for MetricLabel.TOKEN_TYPE (gen_ai.token.type)."""
+
+    INPUT = "input"
+    OUTPUT = "output"
+
+
 class Langfuse:
     """Langfuse OTLP ingestion attributes (mirrored, see module docstring)."""
 
@@ -292,4 +345,25 @@ def verify_against_upstream() -> dict[str, tuple[str, str]]:
         theirs = getattr(up, theirs_name, None)
         if theirs is not None and theirs != ours:
             drift[ours_name] = (ours, theirs)
+
+    # GenAI *metric* names live in a separate incubating module and drift for the
+    # same reason. Check them here too, keyed distinctly so a reader can tell an
+    # attribute drift from a metric drift.
+    try:
+        from opentelemetry.semconv._incubating.metrics import (  # noqa: PLC0415
+            gen_ai_metrics as upm,
+        )
+        metric_pairs = {
+            "OPERATION_DURATION": "GEN_AI_CLIENT_OPERATION_DURATION",
+            "TOKEN_USAGE": "GEN_AI_CLIENT_TOKEN_USAGE",
+            "TIME_TO_FIRST_CHUNK": "GEN_AI_CLIENT_OPERATION_TIME_TO_FIRST_CHUNK",
+        }
+        for ours_name, theirs_name in metric_pairs.items():
+            ours = getattr(GenAIMetric, ours_name)
+            theirs = getattr(upm, theirs_name, None)
+            if theirs is not None and theirs != ours:
+                drift[f"metric:{ours_name}"] = (ours, theirs)
+    except Exception:  # noqa: BLE001
+        pass
+
     return drift

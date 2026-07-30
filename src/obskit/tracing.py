@@ -47,6 +47,7 @@ Every attribute value passes through `redaction.scrub()` inside
 to redact at a callsite.
 """
 import json
+import time
 import uuid
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -394,12 +395,21 @@ def reset_for_tests() -> None:
 
 
 def shutdown(timeout_millis: int = 8000) -> None:
-    """Flush queued spans on service stop. Never raises."""
+    """Flush queued spans on service stop, and the meter provider if metrics are
+    on. Never raises."""
     global _enabled
     try:
         if _provider is not None:
             _provider.force_flush(timeout_millis)
             _provider.shutdown()
+    except Exception:  # noqa: BLE001
+        pass
+    # If metrics were turned on (setup_metrics), flush and stop the meter
+    # provider on the same process-stop path — so the app has one shutdown()
+    # to call, not two. No-op when metrics were never set up.
+    try:
+        from . import metrics
+        metrics.shutdown(timeout_millis)
     except Exception:  # noqa: BLE001
         pass
     finally:
@@ -532,6 +542,23 @@ class _Span:
         # why utilisation lands on every generation span in the app — chat, stream,
         # title, summarize, contextualize, refine passes, agent steps — for free.
         self._num_ctx: int | None = None
+        # --- metric capture (read by obskit.metrics at span close) -----------
+        # These mirror, in plain fields, the few bounded facts a metric needs, so
+        # the metrics layer never has to parse span attributes back out. They are
+        # populated by the same set_* calls the application already makes; nothing
+        # new is threaded through any callsite. `_metric_t0` is a monotonic clock
+        # read (immune to wall-clock steps) used purely for duration.
+        self._metric_t0: float = time.monotonic()
+        self._metric_obs_type: str | None = None
+        self._metric_route: str | None = None
+        self._metric_model: str | None = None
+        self._metric_operation: str | None = None
+        self._metric_provider: str | None = None
+        self._metric_input_tokens = None
+        self._metric_output_tokens = None
+        self._metric_ttft: float | None = None
+        self._metric_errored: bool = False
+        self._metric_degraded: bool = False
 
     # -- identity ---------------------------------------------------------
     @property
@@ -567,6 +594,18 @@ class _Span:
         try:
             if value is not None:
                 self._span.set_attribute(key, scrub(_attr_value(value)))
+                # Snapshot the handful of BOUNDED attributes a metric labels by,
+                # into plain fields. Only these keys, never request/user/session
+                # ids — so the metrics layer physically cannot read a
+                # high-cardinality value off a span even if it tried.
+                if key == App.ROUTE:
+                    self._metric_route = value
+                elif key == GenAI.REQUEST_MODEL:
+                    self._metric_model = value
+                elif key == GenAI.OPERATION_NAME:
+                    self._metric_operation = value
+                elif key == GenAI.PROVIDER_NAME:
+                    self._metric_provider = value
         except Exception:  # noqa: BLE001
             pass
         return self
@@ -606,9 +645,11 @@ class _Span:
         if input_tokens is not None:
             details["input"] = int(input_tokens)
             self.set_attribute(GenAI.USAGE_INPUT_TOKENS, int(input_tokens))
+            self._metric_input_tokens = int(input_tokens)
         if output_tokens is not None:
             details["output"] = int(output_tokens)
             self.set_attribute(GenAI.USAGE_OUTPUT_TOKENS, int(output_tokens))
+            self._metric_output_tokens = int(output_tokens)
         details.update({k: v for k, v in extra.items() if v is not None})
         if details:
             self.set_attribute(Langfuse.OBSERVATION_USAGE_DETAILS, _serialize(details))
@@ -652,7 +693,17 @@ class _Span:
         return self
 
     def set_completion_start(self):
-        """Mark time-to-first-token on a generation."""
+        """Mark time-to-first-token on a generation.
+
+        Besides the Langfuse timestamp attribute, capture TTFT as an elapsed
+        duration (first-token time minus span start) for the metrics layer — the
+        attribute alone is a wall-clock instant, which a histogram cannot use.
+        """
+        if self._metric_ttft is None:
+            try:
+                self._metric_ttft = max(0.0, time.monotonic() - self._metric_t0)
+            except Exception:  # noqa: BLE001
+                pass
         return self.set_attribute(
             Langfuse.OBSERVATION_COMPLETION_START_TIME,
             _serialize(datetime.now(timezone.utc).isoformat()),
@@ -663,6 +714,7 @@ class _Span:
             from opentelemetry.trace import Status, StatusCode
 
             text = message or (f"{type(exc).__name__}: {exc}" if exc else "error")
+            self._metric_errored = True
             self._span.set_status(Status(StatusCode.ERROR, text))
             self.set_attribute(Langfuse.OBSERVATION_LEVEL, ObservationLevel.ERROR)
             self.set_attribute(Langfuse.OBSERVATION_STATUS_MESSAGE, text[:2000])
@@ -688,6 +740,7 @@ class _Span:
         without enumerating per-subsystem attribute names.
         """
         try:
+            self._metric_degraded = True
             self.set_attribute(Langfuse.OBSERVATION_LEVEL, ObservationLevel.WARNING)
             self.set_attribute(Langfuse.OBSERVATION_STATUS_MESSAGE, str(message)[:2000])
             self.set_attribute(App.DEGRADED, True)
@@ -745,6 +798,7 @@ def _start(name: str, *, observation_type: str, parent=None, start_time=None,
             name, context=_parent_context(parent), start_time=start_time
         )
         h = _Span(raw)
+        h._metric_obs_type = observation_type
         h.set_attribute(Langfuse.OBSERVATION_TYPE, observation_type)
         rid = _request_id_var.get()
         if rid:
@@ -785,6 +839,15 @@ def _managed(handle):
         raise
     finally:
         handle.end()
+        # Emit the matching metric (model-call / retrieval), if metrics are on.
+        # Imported lazily to keep tracing importable without the metrics module's
+        # SDK imports, and to sidestep the tracing<->metrics import cycle. No-op
+        # unless the application called setup_metrics().
+        try:
+            from . import metrics
+            metrics.on_span_end(handle)
+        except Exception:  # noqa: BLE001
+            pass
         if token is not None:
             try:
                 _parent_span_var.reset(token)
@@ -935,11 +998,37 @@ def end_root_span(handle=None, *, output=None, error: str | None = None) -> None
         pass
     finally:
         h.end()
+        # Request-level metric. Outcome is decided HERE (not read off the span):
+        # an explicit error wins; else any degradation recorded during this
+        # request makes it "degraded"; else "ok". Degradation is read from the
+        # request's accumulated list rather than a span flag because it is lifted
+        # onto the root via set_attribute, not set_degraded. Metrics off -> no-op.
+        try:
+            if error:
+                outcome = "error"
+            elif degradations():
+                outcome = "degraded"
+            else:
+                outcome = "ok"
+            from . import metrics
+            metrics.on_request_end(h, outcome=outcome)
+        except Exception:  # noqa: BLE001
+            pass
         try:
             _root_span_var.set(None)
             _parent_span_var.set(None)
         except Exception:  # noqa: BLE001
             pass
+
+
+def _current_resource():
+    """The SDK Resource init() built, so metrics can reuse the exact same one
+    (identical service.* and service.instance.id) and thus correlate with traces.
+    Returns None if tracing was never initialized."""
+    try:
+        return _provider.resource if _provider is not None else None
+    except Exception:  # noqa: BLE001
+        return None
 
 
 def service_identity() -> dict:

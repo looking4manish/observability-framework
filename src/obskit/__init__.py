@@ -26,7 +26,8 @@ Quick start:
 Service identity is required. There are no defaults — see ServiceIdentityError.
 """
 from .semconv import (SEMCONV_SCHEMA_URL, SEMCONV_VERSION, App, GenAI,
-                      GenAIOperation, Langfuse, ObservationLevel, ObservationType,
+                      GenAIMetric, GenAIOperation, Langfuse, LabMetric, MetricLabel,
+                      ObservationLevel, ObservationType, TokenType,
                       verify_against_upstream)
 from .logs import JsonFormatter, get_logger, setup_logging
 from .redaction import scrub, scrub_text
@@ -37,8 +38,16 @@ from .tracing import (NULL_SPAN, ServiceIdentityError, adopt_root, bind_request,
                       record_generation, redact_messages, request_id, reset_for_tests,
                       service_identity, session_id, set_context_state, shutdown, span,
                       start_root_span, status, tenant_id, tool_span, user_id)
+from . import metrics
+from .metrics import setup_metrics
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
+
+
+def metrics_status() -> dict:
+    """Live metrics export health. Alias for `obskit.metrics.status()`, kept next
+    to `status()` (traces) so an admin surface can report both signals."""
+    return metrics.status()
 
 
 def langfuse_endpoint(host: str, public_key: str, secret_key: str) -> dict:
@@ -61,13 +70,15 @@ def langfuse_endpoint(host: str, public_key: str, secret_key: str) -> dict:
 __all__ = [
     "__version__", "langfuse_endpoint",
     # semconv
-    "App", "GenAI", "GenAIOperation", "Langfuse", "ObservationLevel",
-    "ObservationType", "SEMCONV_VERSION", "SEMCONV_SCHEMA_URL",
-    "verify_against_upstream",
+    "App", "GenAI", "GenAIMetric", "GenAIOperation", "Langfuse", "LabMetric",
+    "MetricLabel", "ObservationLevel", "ObservationType", "TokenType",
+    "SEMCONV_VERSION", "SEMCONV_SCHEMA_URL", "verify_against_upstream",
     # redaction
     "scrub", "scrub_text",
     # structured logging (opt-in; init() never configures logging for you)
     "setup_logging", "JsonFormatter", "get_logger",
+    # metrics (opt-in; init() never builds a meter provider for you)
+    "setup_metrics", "metrics", "metrics_status",
     # lifecycle
     "init", "shutdown", "flush", "status", "enabled", "init_error",
     "ServiceIdentityError", "reset_for_tests",

@@ -1,7 +1,8 @@
 # observability-framework (`obskit`)
 
-OpenTelemetry span-tree tracing for LLM applications, exported to Langfuse over
-OTLP/HTTP.
+OpenTelemetry span-tree tracing, structured logging and metrics for LLM
+applications, exported over OTLP/HTTP (to a Collector, or straight to Langfuse
+for traces).
 
 Extracted from the Legion Chat application so other applications can share the
 same vocabulary and the same tracing behaviour. Distribution name is
@@ -42,6 +43,11 @@ finally:
   produces a WARNING span with `lab.degraded=true`, and it propagates to the
   root so a degraded request is visible in a trace list without expanding
   anything.
+- **Metrics that refuse to explode.** The same span lifecycle that builds the
+  trace also records request/model-call/retrieval histograms — no new callsites.
+  Every label is filtered against a fixed allow-list and a per-label
+  cardinality cap *in code*, so a request id or user id has no way to become a
+  time series. Opt-in, exactly like the logging. See [Metrics](#metrics).
 - **Fail-soft everywhere.** Every public function swallows its own exceptions and
   returns a no-op handle. A dead collector never reaches the request path.
 
@@ -160,8 +166,32 @@ own warnings will appear in your log stream.
 `setup_logging()`. Those access lines **can** be brought into the same format:
 pass `capture_uvicorn=True` and their handlers are removed and they propagate to
 the JSON handler instead. It is off by default because it mutates loggers this
-package does not own. Note they will carry no `request_id` or `trace_id`: uvicorn
-emits them after the response, outside the request context.
+package does not own.
+
+**Access lines DO carry the correlation set (correction, 0.3.0).** An earlier
+version of this note claimed the opposite — that access lines "carry no
+`request_id` or `trace_id`: uvicorn emits them after the response, outside the
+request context." That is wrong, and production logs disprove it. uvicorn emits
+the access record from *within the same ASGI task* that served the request, so
+the request-scoped contextvars `bind_request()` set are still in scope when the
+JSON formatter reads them. "After the response" is not "outside the context": the
+task's contextvars are not torn down when the response is sent. A verified line
+for a streaming `POST /api/chat`:
+
+```json
+{"logger":"uvicorn.access","message":"127.0.0.1:36386 - \"POST /api/chat HTTP/1.1\" 200",
+ "request_id":"227b7c789a51485c91326c394ada6602",
+ "trace_id":"f6f14e647f9ded296baf331a9ae1309c","span_id":"2257143ec595250d",
+ "user_id":"6a3f...","session_id":"6a6b...","service":{"name":"legion-chat-backend",...}}
+```
+
+This holds for **both** streaming and non-streaming responses — the streaming
+case is the one the old note specifically got wrong, because a streamed body
+finishes long after the endpoint returns yet still runs in the same task. The
+one access line that carries *none* of the correlation fields is a request that
+never bound identity — a health check, an unauthenticated probe. That is correct:
+there was no request identity to carry, so only `service` appears (verified: the
+`GET /api/health` access line has no `request_id`/`trace_id`).
 
 Options: `level`, `stream` (defaults to stdout), `capture_uvicorn`,
 `static_fields`, `include_source`, `replace_existing`. Returns a status dict and
@@ -169,6 +199,134 @@ never raises — a logging misconfiguration must not stop a service starting.
 
 Logs go to **stdout only**. Shipping them over OTLP to a collector is
 deliberately out of scope.
+
+## Metrics
+
+A trace tells you what one request did; a metric tells you what a thousand
+requests did in aggregate — the rate, the latency distribution, the error and
+degradation fractions — without keeping a row per request. Metrics export over
+OTLP to the **same Collector** as traces (the `/v1/metrics` path), which
+re-exposes them for Prometheus to scrape.
+
+```python
+obskit.setup_metrics()                 # after init(); reuses its endpoint + Resource
+```
+
+That is the whole adoption cost. `setup_metrics()` derives the metrics endpoint
+from the traces endpoint `init()` was given, reuses the exact `Resource` (so
+metrics and traces share `service.instance.id` and correlate), and then the span
+helpers you already call record the matching metric on close. **No new
+callsites**: a `generation()` records the model-call metrics, a `RETRIEVER` span
+records retrieval duration, and `end_root_span()` records the request metric.
+
+### The metric set
+
+Five instruments cover the ten measurements in the brief. **All five are
+histograms**, and that is a deliberate choice, not laziness:
+
+| Measurement(s) | Instrument name | Type | Unit | Standard? |
+|---|---|---|---|---|
+| request count · duration · error count · degraded-turn count | `lab.request.duration` | Histogram | `s` | `lab.` (no standard) |
+| model-call count · duration | `gen_ai.client.operation.duration` | Histogram | `s` | **GenAI 1.37.0** |
+| input tokens · output tokens | `gen_ai.client.token.usage` | Histogram | `{token}` | **GenAI 1.37.0** |
+| time to first token | `gen_ai.client.operation.time_to_first_chunk` | Histogram | `s` | **GenAI 1.37.0** |
+| retrieval duration | `lab.retrieval.duration` | Histogram | `s` | `lab.` (no standard) |
+
+**Why histograms and not counters.** A histogram already carries a monotonic
+`count` and a `sum`. So request count *is* `lab_request_duration_count`, model-call
+count *is* the operation-duration count, and total tokens *is* the token-usage
+`sum`. Emitting separate counters would double the series for information the
+histogram already exposes. **Error count and degraded-turn count** are likewise
+not separate instruments — they are the request histogram's count sliced by the
+`lab.outcome` label (`ok` / `error` / `degraded`). This follows the OTel HTTP
+semantic convention, where request rate and error rate both derive from
+`http.server.request.duration` rather than from dedicated counters. No
+UpDownCounter is used: none of the ten measurements is a gauge-like quantity that
+rises and falls (there is no "in-flight requests" in the requested set).
+
+**Standard names.** Where the OTel GenAI semantic conventions (pinned at
+`SEMCONV_VERSION = 1.37.0`) already define a metric, that exact name is used
+rather than a `lab.` invention — `gen_ai.client.operation.duration`,
+`gen_ai.client.token.usage`, `gen_ai.client.operation.time_to_first_chunk` (the
+*client* time-to-first-chunk, because the application is the client of the model
+server). Only the two measurements with no standard — a generic application
+request and a retrieval — get the `lab.` prefix. Naming follows the OTel metric
+convention: dotted, lowercase, no unit in the name (the unit rides on the
+instrument), matching the shape of stable `http.server.request.duration`. These
+metric-name literals are pinned and re-declared exactly like the `gen_ai.*`
+attribute strings, and `verify_against_upstream()` now checks them too.
+
+### Labels: bounded only, enforced in code
+
+**Every distinct label-value combination is a separate time series.** So the
+label policy is the most important part of this design, and it is enforced by
+`metrics._labels()` — not by documentation you have to remember.
+
+**Allowed** (all bounded / closed sets): service identity (`service.*`,
+`deployment.*`, from the Resource), `lab.route`, `lab.outcome`,
+`gen_ai.request.model`, `gen_ai.provider.name`, `gen_ai.operation.name`,
+`gen_ai.token.type`, and — opt-in only — `lab.tenant.id`.
+
+**Refused** (high-cardinality identifiers): request id, trace id, span id, user
+id, session id, conversation id, raw query / message text. These can *never*
+become labels. How that is guaranteed, in layers:
+
+1. **No free-form attribute parameter exists.** The recording hooks take no
+   `**attributes` dict, so there is no parameter through which a request id could
+   arrive. The bounded facts a metric labels by are snapshotted onto the span
+   from the same `set_*` calls the app already makes — and only a fixed handful
+   of keys (route, model, operation, provider) are snapshotted; the identity
+   contextvars are never read into the metric path.
+2. **Allow-list.** `_labels()` keeps only keys in a fixed `frozenset`. Anything
+   else is dropped before it reaches the SDK.
+3. **Deny-list.** The known-dangerous keys are *also* explicitly dropped, so even
+   a future refactor that routed one in would fail closed. (Redundant with the
+   allow-list by design — redundancy is the point.)
+4. **Per-label cardinality cap.** Even an allowed label whose value set is
+   bounded-in-practice-but-not-in-theory (model, route, provider, tenant) is
+   capped: once a label has `value_cardinality_cap` distinct values (default 50),
+   every further *new* value folds to `__other__`, so no label can silently grow
+   the series count without bound.
+5. **Redaction.** String label values pass through the same `redaction.scrub_text`
+   traces and logs use — one implementation, no drift.
+
+**Tenant is opt-in and capped.** `lab.tenant.id` is bounded today but may not stay
+so, so it is **off by default**. Turn it on with
+`setup_metrics(tenant_label=True, tenant_allowlist=[...])`: a tenant outside the
+allow-list folds to `"other"` (never the raw id), and the cardinality cap applies
+on top. Traces still carry per-request tenant detail regardless.
+
+**Worst-case series count.** With caps saturated (route 50 · model 50 · provider
+50 · 4 outcomes · 2 token types) and the OTel default ~16 histogram buckets plus
+`_sum`/`_count`, the five instruments come to **≈ 58,000 series per process**.
+The dominant term is the model-call duration histogram (`operation × model ×
+provider × outcome × buckets`). Realistically — ~6 routes, ~10 models, one
+provider, one process — it is **≈ 5,500 series**. Estimated as the product of
+label-value counts per instrument, times per-histogram bucket series, summed over
+the five instruments. One multiplier is outside this package: the Collector's
+Prometheus exporter has `resource_to_telemetry_conversion` on, which promotes
+every Resource attribute (including the per-process `service.instance.id`, a fresh
+UUID each restart) to a label — so each restart starts a new series family that
+expires after the Collector's `metric_expiration` (5m). Bounded, but real.
+
+### Export health in `status()`
+
+`obskit.metrics_status()` (alias for `obskit.metrics.status()`) reports not just
+the startup decision but whether export is **succeeding now**: `exports_succeeded`,
+`exports_failed`, `consecutive_failures`, `last_success`, `last_failure`,
+`last_error`. The OTLP metric exporter does not expose any of this itself — so
+rather than invent numbers, `setup_metrics` wraps the real exporter and records
+the result of each `export()` call. When metrics run against an in-memory reader
+(tests) there is no push exporter to observe, and the health fields are `None`
+with `health_source: "unavailable ..."` — stated, not faked.
+
+### Fail-soft and optional, like everything else
+
+`init()` does **not** build a meter provider and never will — an application that
+wants only traces gets none (verified by a test). Every recording path swallows
+its own exceptions, so a label that fails to build or a dead Collector costs you
+the metric, never the request. `setup_metrics()` returns a status dict rather than
+raising.
 
 ## Attribute namespaces
 
@@ -282,9 +440,14 @@ under `opentelemetry.semconv._incubating.attributes` — a private path free to
 move or vanish in a patch release, which would otherwise break tracing at import
 time.
 
-`semconv.verify_against_upstream()` compares all 19 pinned literals against
-whatever OTel is installed and returns `{constant: (ours, theirs)}` for anything
-that drifted. Empty dict means clean.
+`semconv.verify_against_upstream()` compares the 19 pinned `gen_ai.*` attribute
+literals — **plus, as of 0.3.0, the 3 pinned GenAI metric-name literals**
+(`gen_ai.client.operation.duration`, `gen_ai.client.token.usage`,
+`gen_ai.client.operation.time_to_first_chunk`, which live in a separate
+incubating module and drift for the same reason) — against whatever OTel is
+installed, and returns `{constant: (ours, theirs)}` for anything that drifted.
+Metric drift is keyed `metric:<NAME>` so it is distinguishable from attribute
+drift. Empty dict means clean.
 
 *Enforced in part.* `verify_against_upstream()` in `src/obskit/semconv.py` does
 the comparison, and `tests/test_semconv.py` proves both that it is currently
@@ -322,10 +485,15 @@ you the trace, never the request.
 rather than raising, and the formatter falls back to a minimal line if JSON
 encoding fails, so a bad log record cannot take down the request path.
 
+As of 0.3.0 `setup_metrics()` and the metric-recording hooks follow it too: setup
+returns a status dict, and every `record()` path swallows its own exceptions, so a
+label that fails to build or a Collector that is down costs the metric, never the
+request.
+
 *Enforced by code, with one deliberate exception.* There is exactly one `raise`
 in the entire package — `ServiceIdentityError` in `init()` (rule 5). That is
 startup-time configuration validation, not request-path instrumentation. Once
-`init()` has returned, nothing in this package raises.
+`init()` has returned, nothing in this package raises — traces, logs or metrics.
 
 ### 7. Redaction happens at the choke point
 
@@ -344,12 +512,17 @@ no path to an attribute that bypasses redaction. That is the point: a per-callsi
 time someone forgot.
 
 As of 0.2.0 the same applies to logs: `logs.JsonFormatter` scrubs the message,
-`extra=` fields, exception text and stack traces through the same `scrub()`.
-Two output paths, one redaction implementation.
+`extra=` fields, exception text and stack traces through the same `scrub()`. As
+of 0.3.0 it applies to metric label values too — `metrics._bounded()` runs each
+value through the same `scrub_text()`. Three output paths, one redaction
+implementation. (Metric labels are bounded closed sets, so a secret reaching one
+would be a bug elsewhere; scrubbing them anyway keeps the single-choke-point rule
+intact rather than making metrics the one exception.)
 
 *Enforced by code:* `src/obskit/redaction.py` applied at
-`src/obskit/tracing.py` (`_Span.set_attribute`, `_serialize`) and at
-`src/obskit/logs.py` (`JsonFormatter._build`); covered by
+`src/obskit/tracing.py` (`_Span.set_attribute`, `_serialize`), at
+`src/obskit/logs.py` (`JsonFormatter._build`) and at
+`src/obskit/metrics.py` (`_bounded`); covered by
 `tests/test_redaction.py`,
 `tests/test_tracing.py::test_redaction_applied_in_attribute_path` and
 `tests/test_logs.py::test_redaction_uses_the_shared_module`.
@@ -394,9 +567,19 @@ startup log line reporting tracing state is swallowed by uvicorn's logging
 config, so without `status()` the only way to tell a live exporter from a
 silently-disabled one is to send a request and go look in the collector.
 
-**This package currently fails its own rule, and it is stated here rather than
-hidden.** `verify_against_upstream()` (rule 4) is written, exported and tested,
-but nothing calls it — not at import, not in `status()`, which reports
+As of 0.3.0 `metrics_status()` extends this to metrics and goes one step further
+than the tracing `status()`: it reports not just the startup decision but **live
+export health** — `exports_succeeded`, `exports_failed`, `consecutive_failures`,
+`last_success`, `last_failure`, `last_error` — so a metrics pipeline that
+initialised fine but is now failing to reach the Collector is visible without
+guessing. Where the SDK genuinely exposes nothing (an in-memory reader has no
+push exporter), the field is `None` with a `health_source` note rather than a
+fabricated zero.
+
+**This package still partly fails its own rule for the drift check, and it is
+stated here rather than hidden.** `verify_against_upstream()` (rule 4) is written,
+exported and tested — and as of 0.3.0 covers the metric names too — but nothing
+calls it automatically: not at import, not in `status()`, which reports
 `semconv_version` but never the drift result. So a consumer sees `1.37.0` and
 reasonably assumes the pin has been checked, when it has only been declared.
 Until that is wired up, run the check yourself in CI:
@@ -454,10 +637,30 @@ not on intent.
 
    Skip it entirely and your logging is untouched.
 
-4. **Expose `status()` on your health endpoint** (rule 9), so a silently
-   disabled exporter is visible without sending a request and going to look.
+4. **Call `setup_metrics()` if you want metrics.** Optional, separate from
+   `init()` for the same reason `setup_logging()` is: `init()` never builds a
+   meter provider. Call it once after `init()` — it reuses `init()`'s resource
+   and derives the metrics endpoint (`/v1/metrics`) from the trace endpoint, so
+   no second endpoint to configure:
 
-5. **Bind identity once per request, at the outermost frame.**
+   ```python
+   obskit.setup_metrics(enabled_flag=cfg.metrics_enabled)
+   ```
+
+   Nothing else changes at your callsites: the instruments are recorded from
+   inside the span lifecycle you already drive (`start_root_span`/`end_root_span`,
+   `generation()`, retriever spans), so a span you already open becomes a metric
+   the moment metrics are on, and records nothing until they are. Only bounded
+   labels are emitted — see [Metrics](#metrics) for the label rules and the
+   tenant opt-in (`tenant_label=`, `tenant_allowlist=`). Skip this call and no
+   meter provider exists and no metric is recorded.
+
+5. **Expose `status()` and `metrics_status()` on your health endpoint** (rule 9),
+   so a silently disabled trace exporter — or a metrics pipeline that initialised
+   but is now failing to reach the Collector — is visible without sending a
+   request and going to look.
+
+6. **Bind identity once per request, at the outermost frame.**
 
    ```python
    request_id = obskit.bind_request(user_id=uid, session_id=conv_id,
@@ -468,7 +671,7 @@ not on intent.
    returned to you. `tenant_id` lands as `lab.tenant.id` on every span in the
    request.
 
-6. **Open a root span per unit of work and close it in a `finally`.**
+7. **Open a root span per unit of work and close it in a `finally`.**
    `start_root_span()` is deliberately not a context manager, because a streaming
    response has to outlive the handler that created it.
 
@@ -487,16 +690,20 @@ not on intent.
    stack, and any middleware that runs the generator in a fresh task would
    silently orphan every child span.
 
-7. **Instrument with the span helpers, referencing `App.*` never string
+8. **Instrument with the span helpers, referencing `App.*` never string
    literals** (rule 3): `span()`, `generation()`, `embedding()`, `tool_span()`.
    Pass `provider=` explicitly on `generation()` and `embedding()` — there is no
    default, and when omitted `gen_ai.provider.name` is simply not set rather than
    set to something untrue.
 
-8. **Call `shutdown()` on process stop.** Spans are exported by a background
-   thread; without it a restart drops whatever was still queued.
+9. **Call `shutdown()` on process stop.** Spans are exported by a background
+   thread; without it a restart drops whatever was still queued. The one
+   `shutdown()` also flushes and stops the meter provider when metrics are on
+   (the periodic metric reader flushes on the same process-stop path), so there
+   is a single shutdown to call, not two.
 
-9. **Run the drift check in CI** (rule 9), since nothing runs it for you.
+10. **Run the drift check in CI** (rule 9), since nothing runs it for you — as of
+    0.3.0 it covers the three GenAI metric names too.
 
 ## Install
 

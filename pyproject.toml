@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "observability-framework"
-version = "0.2.0"
-description = "OpenTelemetry span-tree tracing for LLM applications, exported to Langfuse"
+version = "0.3.0"
+description = "OpenTelemetry span-tree tracing and metrics for LLM applications, exported via OTLP"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -34,9 +34,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# The OTLP/HTTP exporter is only needed to actually ship spans. Tests use an
-# in-memory exporter, and an application embedding this in a collector-less
-# environment does not need it either.
+# The OTLP/HTTP exporter is only needed to actually ship spans and metrics (the
+# same distribution provides both the trace and the metric exporter). Tests use
+# in-memory readers/exporters, and an application embedding this in a
+# collector-less environment does not need it either.
 otlp = ["opentelemetry-exporter-otlp-proto-http>=1.43.0,<2"]
 dev = [
     "pytest>=8,<9",
