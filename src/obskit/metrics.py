@@ -411,23 +411,85 @@ def setup_metrics(*, enabled_flag: bool = True,
         return {"status": "error", "reason": _init_error}
 
 
+# ---------------------------------------------------------------------------
+# histogram bucket boundaries
+# ---------------------------------------------------------------------------
+#
+# Every histogram below ships EXPLICIT bucket boundaries, sized to what this
+# system actually does. Without them the SDK falls back to its default boundaries
+# — [0, 5, 10, 25, 50, 75, 100, 250, 500, 750, 1000, 2500, 5000, 7500, 10000] —
+# which are calibrated for MILLISECONDS. Every duration here is recorded in
+# SECONDS (unit="s"; see _elapsed), so real latencies collapse into the first one
+# or two of those buckets and p50/p95/p99 become indistinguishable. Ranges below
+# are measured on the Legion Chat workload (Prometheus + trace artifacts), not
+# guessed: retrieval ~15 ms, time-to-first-token sub-second to a few seconds,
+# model calls ~0.05–25 s, whole chat turns ~2–50 s (a compression-heavy turn was
+# observed at 48 s).
+#
+# These are passed as `explicit_bucket_boundaries_advisory`, i.e. as a property of
+# the INSTRUMENT rather than as a MeterProvider View. That is the library-correct
+# seam: obskit *advises* the scale it knows about, and an adopting application can
+# still override any of these with its own View without editing this package. A
+# View shipped from here would instead silently win over the app's own config.
+#
+# Series cost: each histogram produces (finite buckets + 1 for +Inf + _sum +
+# _count) time series PER label-value combination. Every count below is LOWER than
+# the 18/combo the 15-boundary default produced — resolution went up while the
+# series count went down. See the README "Histogram buckets" section.
+#
+# CHANGING THESE IS A BREAKING CHANGE: re-bucketing makes histograms recorded
+# before and after incomparable (old and new le-series do not line up), so it
+# rides a version bump exactly like an attribute rename (working rule 2).
+
+# lab.request.duration — a whole request / chat turn. Observed ~2–50 s, tail to a
+# ~48 s compression turn. 10 finite buckets -> 13 series/combo.
+REQUEST_DURATION_BUCKETS = [0.25, 0.5, 1, 2, 4, 8, 15, 30, 60, 120]
+
+# gen_ai.client.operation.duration — one model call, fast embeddings through long
+# generations/summarisation. Observed mean ~2.9 s, tail into 10–25 s. 11 finite
+# buckets -> 14 series/combo.
+OPERATION_DURATION_BUCKETS = [0.05, 0.1, 0.25, 0.5, 1, 2, 4, 8, 16, 32, 64]
+
+# gen_ai.client.operation.time_to_first_chunk — the latency a user actually feels.
+# Its useful range is far shorter than a whole turn, so it gets five sub-second
+# buckets and a shorter top (30 s, for cold model loads). Observed mean ~0.9 s.
+# 10 finite buckets -> 13 series/combo.
+TTFT_BUCKETS = [0.05, 0.1, 0.2, 0.4, 0.8, 1.5, 3, 6, 12, 30]
+
+# lab.retrieval.duration — vector search + rerank. Milliseconds to a few seconds;
+# observed mean ~15 ms. Fine millisecond resolution where the mass is. 10 finite
+# buckets -> 13 series/combo.
+RETRIEVAL_DURATION_BUCKETS = [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5]
+
+# gen_ai.client.token.usage — a COUNT, not a duration ({token}); bucketed here too
+# so no instrument is left on accidental defaults and the no-defaults test can
+# cover all five. Sized for token counts: small outputs through large input
+# contexts (observed 1–5.3k tokens; headroom to 100k). 12 finite -> 15 series/combo.
+TOKEN_USAGE_BUCKETS = [10, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 25000, 50000, 100000]
+
+
 def _build_instruments(meter) -> None:
     global _h_request, _h_operation, _h_tokens, _h_ttft, _h_retrieval
     _h_request = meter.create_histogram(
         LabMetric.REQUEST_DURATION, unit="s",
-        description="Duration of an application request (root span), by route and outcome.")
+        description="Duration of an application request (root span), by route and outcome.",
+        explicit_bucket_boundaries_advisory=REQUEST_DURATION_BUCKETS)
     _h_operation = meter.create_histogram(
         GenAIMetric.OPERATION_DURATION, unit="s",
-        description="GenAI operation (model call) duration.")
+        description="GenAI operation (model call) duration.",
+        explicit_bucket_boundaries_advisory=OPERATION_DURATION_BUCKETS)
     _h_tokens = meter.create_histogram(
         GenAIMetric.TOKEN_USAGE, unit="{token}",
-        description="Number of input and output tokens used, by token type.")
+        description="Number of input and output tokens used, by token type.",
+        explicit_bucket_boundaries_advisory=TOKEN_USAGE_BUCKETS)
     _h_ttft = meter.create_histogram(
         GenAIMetric.TIME_TO_FIRST_CHUNK, unit="s",
-        description="Time from issuing a model call to its first streamed chunk.")
+        description="Time from issuing a model call to its first streamed chunk.",
+        explicit_bucket_boundaries_advisory=TTFT_BUCKETS)
     _h_retrieval = meter.create_histogram(
         LabMetric.RETRIEVAL_DURATION, unit="s",
-        description="Duration of a retrieval (vector search + rerank), by outcome.")
+        description="Duration of a retrieval (vector search + rerank), by outcome.",
+        explicit_bucket_boundaries_advisory=RETRIEVAL_DURATION_BUCKETS)
 
 
 def reset_for_tests() -> None:
