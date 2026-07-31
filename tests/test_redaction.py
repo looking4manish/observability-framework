@@ -69,6 +69,37 @@ def test_truncated_private_key_header():
     assert "PRIVATE KEY BLOCK" in out
 
 
+def test_jwt_caught_without_a_keyword():
+    """The keyword-anchored patterns need context. A JWT does not: it carries its
+    own "eyJ" marker, so it is still caught when nothing precedes it."""
+    out = scrub_text("eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjMifQ.s1gn4tur3")
+    assert "eyJzdWIiOiIxMjMifQ" not in out
+    assert "REDACTED JWT" in out
+
+
+def test_jwt_caught_when_truncation_severed_the_keyword():
+    """The regression for the observed leak.
+
+    An application elided the middle of a long value before handing it over, cutting
+    the word "Bearer" down to "er". _BEARER then matched nothing and the token
+    reached the span in full. The severed form must still be redacted.
+    """
+    severed = "please ignore the following configurati … er eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiI0NTYifQ.abcd1234"
+    assert "Bearer" not in severed          # the anchor really is gone
+    out = scrub_text(severed)
+    assert "eyJhbGciOiJIUzI1NiJ9" not in out, f"token survived truncation: {out!r}"
+    assert "REDACTED JWT" in out
+
+
+def test_jwt_pattern_leaves_ordinary_prose_alone():
+    """"eyJ" is a real marker, not a coincidence-prone one. Nothing here may match."""
+    for benign in ("the key is under the mat",
+                   "eyJ",                      # marker alone, no token after it
+                   "conveyJoined words",       # 'eyJ' present but not at a boundary
+                   "model=llama3.1:8b latency=1.25s"):
+        assert scrub_text(benign) == benign, f"false positive on {benign!r}"
+
+
 def test_named_secret_kv():
     out = scrub_text('{"password": "hunter2", "host": "db1"}')
     assert "hunter2" not in out and "db1" in out
