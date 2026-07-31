@@ -1,0 +1,117 @@
+name: CI
+
+# verify_against_upstream() was tested but called by nothing, and the repo had no
+# CI at all. This runs both: the test suite, and the drift check as a build gate.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: tests (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.10 is the floor declared in pyproject requires-python; 3.12 is what
+        # runs on OCI today.
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install package with dev extras
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,otlp]"
+
+      - name: Show installed OTel versions
+        run: python -m pip list | grep -i opentelemetry
+
+      - name: Run test suite
+        run: python -m pytest -q
+
+  drift:
+    name: semconv drift gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package with dev extras
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,otlp]"
+
+      - name: Show installed OTel versions
+        run: python -m pip list | grep -i opentelemetry
+
+      # Exits non-zero on drift, which fails the job. A warning nobody reads is
+      # the same as no check.
+      - name: Fail on semconv drift from installed OTel SDK
+        run: python .github/scripts/drift_check.py
+
+      # Both halves: prove the gate can actually fail. If injected drift does not
+      # produce a non-zero exit, the green result above proved nothing.
+      - name: Self-test the gate (injected drift must fail)
+        run: |
+          python - <<'EOF'
+          import subprocess, sys, textwrap, pathlib
+          inject = textwrap.dedent("""
+              import runpy, sys
+              from obskit import semconv
+              semconv.GenAI.REQUEST_MODEL = "gen_ai.request.DELIBERATELY_WRONG"
+              sys.argv = ["drift_check.py"]
+              runpy.run_path(".github/scripts/drift_check.py", run_name="__main__")
+          """)
+          p = subprocess.run([sys.executable, "-c", inject],
+                             capture_output=True, text=True)
+          print(p.stdout, p.stderr)
+          if p.returncode == 0:
+              print("SELF-TEST FAILED: injected drift did not fail the gate.")
+              sys.exit(1)
+          if "DELIBERATELY_WRONG" not in p.stdout:
+              print("SELF-TEST FAILED: gate exited non-zero but did not report the drift.")
+              sys.exit(1)
+          print(f"SELF-TEST OK: injected drift failed the gate (exit {p.returncode}).")
+          EOF
+
+  drift-latest-otel:
+    name: semconv drift gate (latest OTel, advisory)
+    runs-on: ubuntu-latest
+    # Advisory: an upstream rename is not this repo's fault and must not block a
+    # PR, but the Operator wants to hear about it early rather than on upgrade day.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install package, then upgrade OTel to latest
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e ".[dev,otlp]"
+          python -m pip install --upgrade opentelemetry-api opentelemetry-sdk \
+            opentelemetry-semantic-conventions opentelemetry-exporter-otlp-proto-http
+
+      - name: Show installed OTel versions
+        run: python -m pip list | grep -i opentelemetry
+
+      - name: Drift check against latest OTel
+        run: python .github/scripts/drift_check.py
