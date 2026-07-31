@@ -256,6 +256,59 @@ instrument), matching the shape of stable `http.server.request.duration`. These
 metric-name literals are pinned and re-declared exactly like the `gen_ai.*`
 attribute strings, and `verify_against_upstream()` now checks them too.
 
+### Histogram buckets
+
+A histogram is only as useful as its bucket boundaries, and until 0.4.0 the five
+instruments declared none of their own — so the SDK's default boundaries applied:
+
+```
+[0, 5, 10, 25, 50, 75, 100, 250, 500, 750, 1000, 2500, 5000, 7500, 10000]
+```
+
+Those are **milliseconds**. Every duration here is recorded in **seconds**.
+Confirmed against live Prometheus data and the app's trace artifacts, the result
+was: retrieval (mean ~15 ms) and time-to-first-token (mean ~0.9 s) fell entirely
+in the first `(0, 5]` bucket; whole chat turns (mean ~7 s, tail to a 48 s
+compression turn) used only the first three. Most of the fifteen buckets were
+always empty and p50/p95/p99 were indistinguishable — the values did not overflow
+the top, they collapsed into the bottom.
+
+As of 0.4.0 each instrument ships **explicit, per-metric boundaries** sized to its
+own measured range (the `obskit.metrics.*_BUCKETS` lists). Different measurements
+get different scales — a retrieval is not a chat turn:
+
+| Instrument | Boundaries (seconds; tokens for usage) | Finite buckets | Series / combo | Measured range |
+|---|---|---|---|---|
+| `lab.request.duration` | 0.25, 0.5, 1, 2, 4, 8, 15, 30, 60, 120 | 10 | 13 | chat turns ~2–50 s |
+| `gen_ai.client.operation.duration` | 0.05, 0.1, 0.25, 0.5, 1, 2, 4, 8, 16, 32, 64 | 11 | 14 | model calls ~0.05–25 s |
+| `gen_ai.client.operation.time_to_first_chunk` | 0.05, 0.1, 0.2, 0.4, 0.8, 1.5, 3, 6, 12, 30 | 10 | 13 | TTFT sub-second–few s |
+| `lab.retrieval.duration` | 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5 | 10 | 13 | retrieval ~5 ms–a few s |
+| `gen_ai.client.token.usage` | 10, 50, 100, 250, 500, 1000, 2500, 5000, 10000, 25000, 50000, 100000 | 12 | 15 | 1–5.3k tokens (→100k) |
+
+**Time-to-first-token is bucketed differently on purpose.** It is the one latency
+a user actually feels, and its useful range is far shorter than a whole turn, so
+it gets five sub-second boundaries (down to 50 ms) and a top of 30 s rather than
+120 s — resolution where a human notices, not where a batch job lives.
+
+**Token usage is a count, not a duration**, but it sat on the same accidental
+defaults, so it is bucketed here too (in tokens) rather than being left as the one
+instrument still on the SDK default — which also lets the no-defaults test cover
+all five.
+
+**These are advisory, not a View.** They are attached to the instrument
+(`explicit_bucket_boundaries_advisory`) rather than imposed by a MeterProvider
+View, because obskit is a library: it advises the scale it knows, and the adopting
+application keeps the last word — a `View` on the same instrument name in the app
+overrides these without editing this package. A View shipped from here would
+instead silently win over the app's own configuration.
+
+**Re-bucketing is a breaking change.** Histograms recorded before and after a
+boundary change do not line up — the `le` series differ — so old and new data
+cannot be compared and `histogram_quantile` interpolates across the discontinuity.
+This is why the change ships as 0.4.0 rather than a patch, and why working rule 2
+now covers buckets as well as attribute names. Anyone with stored history should
+treat the 0.3.x → 0.4.0 metrics boundary as a hard cut, not a continuation.
+
 ### Labels: bounded only, enforced in code
 
 **Every distinct label-value combination is a separate time series.** So the
@@ -296,14 +349,20 @@ so, so it is **off by default**. Turn it on with
 allow-list folds to `"other"` (never the raw id), and the cardinality cap applies
 on top. Traces still carry per-request tenant detail regardless.
 
-**Worst-case series count.** With caps saturated (route 50 · model 50 · provider
-50 · 4 outcomes · 2 token types) and the OTel default ~16 histogram buckets plus
-`_sum`/`_count`, the five instruments come to **≈ 58,000 series per process**.
-The dominant term is the model-call duration histogram (`operation × model ×
-provider × outcome × buckets`). Realistically — ~6 routes, ~10 models, one
-provider, one process — it is **≈ 5,500 series**. Estimated as the product of
-label-value counts per instrument, times per-histogram bucket series, summed over
-the five instruments. One multiplier is outside this package: the Collector's
+**Worst-case series count.** Each finite bucket, plus the `+Inf` overflow, plus
+`_sum` and `_count`, is one series per label-value combination — so a histogram's
+bucket count multiplies its label combinatorics directly. The explicit boundaries
+above are 13–15 series/combo (see the table under "Histogram buckets"), down from
+the uniform 18 the 15-boundary SDK default gave every instrument. With caps
+saturated (route 50 · model 50 · provider 50 · 4 outcomes · 2 token types) the
+five instruments come to **≈ 45,000 series per process** (was ≈ 58,000 on the
+default buckets). The dominant term is the model-call duration histogram
+(`operation × model × provider × outcome × buckets`). Realistically — ~6 routes,
+~10 models, one provider, one process — it is **≈ 4,300 series** (was ≈ 5,500).
+Estimated as the product of label-value counts per instrument, times per-histogram
+bucket series, summed over the five instruments — re-bucketing moved both figures
+down while raising resolution, because the new per-metric counts are all at or
+below the old default. One multiplier is outside this package: the Collector's
 Prometheus exporter has `resource_to_telemetry_conversion` on, which promotes
 every Resource attribute (including the per-process `service.instance.id`, a fresh
 UUID each restart) to a label — so each restart starts a new series family that
@@ -369,13 +428,13 @@ because an unenforced rule is only as good as the reviewer.
 ### 1. Depend on a pinned tag, never a branch
 
 ```bash
-pip install "observability-framework @ git+https://github.com/looking4manish/observability-framework.git@v0.1.0"
+pip install "observability-framework @ git+https://github.com/looking4manish/observability-framework.git@v0.4.0"
 ```
 
 Or in `requirements.txt`:
 
 ```
-observability-framework @ git+https://github.com/looking4manish/observability-framework.git@v0.1.0
+observability-framework @ git+https://github.com/looking4manish/observability-framework.git@v0.4.0
 ```
 
 Tracking `@main` means an attribute rename lands in your application the next
@@ -396,6 +455,15 @@ and after the change can no longer be queried together.
 Concretely: `lab.retrieval.order_tau` becoming `lab.retrieval.tau` would leave a
 chart of retrieval ordering flat-lining at "no data" from the deploy onward,
 with a healthy application underneath and no error anywhere to point at it.
+
+The same rule covers a histogram's **bucket boundaries**. Change them and, again,
+nothing fails — but histograms recorded before and after no longer share `le`
+series, so `histogram_quantile` interpolates straight across the discontinuity and
+old and new percentiles cannot be compared. **0.4.0 is exactly this change:** it
+replaces the SDK's default (millisecond-scaled) buckets with explicit per-metric
+boundaries (see "Histogram buckets"). That is why it is a 0.4.0 and not a 0.3.1,
+and why anyone holding stored metric history should treat the 0.3.x → 0.4.0
+boundary as a hard cut rather than a continuation.
 
 That is why it is a major bump rather than a minor one: the cost is invisible at
 the point of change and is paid later by whoever is trying to read a trace.

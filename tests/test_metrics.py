@@ -137,6 +137,62 @@ def test_retrieval_duration_records(mem):
 
 
 # ---------------------------------------------------------------------------
+# explicit histogram buckets are applied — NOT the SDK millisecond defaults
+# ---------------------------------------------------------------------------
+
+# The OTel SDK default explicit-bucket boundaries (millisecond-scaled). Recording
+# seconds against these collapses every real latency into the first one or two
+# buckets. This is exactly what obskit must NOT be on. Captured from the SDK
+# (opentelemetry-sdk 1.44.0) so the test states the thing it is defending against.
+_SDK_DEFAULT_BUCKETS = [0.0, 5.0, 10.0, 25.0, 50.0, 75.0, 100.0, 250.0, 500.0,
+                        750.0, 1000.0, 2500.0, 5000.0, 7500.0, 10000.0]
+
+
+def test_histograms_use_explicit_buckets_not_sdk_defaults(mem):
+    """Every histogram must carry its own explicit boundaries. Fails loudly if
+    someone drops explicit_bucket_boundaries_advisory and silently reverts to the
+    SDK's millisecond-scaled defaults (the bug this release fixes)."""
+    # drive one of every instrument through the real span lifecycle
+    tracing.bind_request()
+    root = tracing.start_root_span("chat", attributes={obskit.App.ROUTE: "code"})
+    with tracing.generation("ollama.chat", model="llama3", provider="ollama") as sp:
+        sp.set_completion_start()          # -> time_to_first_chunk
+        sp.set_usage(120, 45)              # -> token.usage (input + output)
+    with tracing.span("memory.retrieve", observation_type=ObservationType.RETRIEVER):
+        pass                               # -> retrieval.duration
+    tracing.end_root_span(root, output="hi")  # -> request.duration
+
+    expected = {
+        LabMetric.REQUEST_DURATION: metrics.REQUEST_DURATION_BUCKETS,
+        GenAIMetric.OPERATION_DURATION: metrics.OPERATION_DURATION_BUCKETS,
+        GenAIMetric.TOKEN_USAGE: metrics.TOKEN_USAGE_BUCKETS,
+        GenAIMetric.TIME_TO_FIRST_CHUNK: metrics.TTFT_BUCKETS,
+        LabMetric.RETRIEVAL_DURATION: metrics.RETRIEVAL_DURATION_BUCKETS,
+    }
+    for name, want in expected.items():
+        pts = _points(mem, name)
+        assert pts, f"{name} recorded no data point"
+        got = [float(b) for b in pts[0].explicit_bounds]
+        assert got == [float(b) for b in want], f"{name}: bounds {got} != {want}"
+        assert got != _SDK_DEFAULT_BUCKETS, f"{name} is on the SDK default buckets"
+
+
+def test_bucket_boundaries_are_sane():
+    """Each bucket list is strictly increasing, positive, and omits the useless
+    (-inf, 0] bucket the SDK default carries. Pure check — no provider needed."""
+    for name, b in {
+        "request": metrics.REQUEST_DURATION_BUCKETS,
+        "operation": metrics.OPERATION_DURATION_BUCKETS,
+        "ttft": metrics.TTFT_BUCKETS,
+        "retrieval": metrics.RETRIEVAL_DURATION_BUCKETS,
+        "tokens": metrics.TOKEN_USAGE_BUCKETS,
+    }.items():
+        assert b == sorted(b), f"{name} not sorted"
+        assert len(b) == len(set(b)), f"{name} has duplicates"
+        assert b[0] > 0, f"{name} includes a non-positive boundary"
+
+
+# ---------------------------------------------------------------------------
 # high-cardinality labels are refused / dropped (in code, not docs)
 # ---------------------------------------------------------------------------
 
