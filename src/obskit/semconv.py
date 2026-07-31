@@ -289,6 +289,20 @@ class App:
     RETRIEVAL_CONTIGUOUS = "lab.retrieval.contiguous"
     RETRIEVAL_ORDER_QUERY = "lab.retrieval.order_query"
 
+    # --- which chunks (retrieval identity) --------------------------------
+    # Everything above says HOW MANY chunks came back, their KIND mix and their
+    # SCORES. None of it says WHICH ones, so a bad answer cannot be traced back
+    # to the specific retrieval that fed it. These close that gap: identifiers
+    # only (never chunk text — the id round-trips to the full chunk in one DB
+    # lookup), and bounded by payload size, not cardinality. `chunk_ids` and
+    # `chunk_kinds` are index-aligned (position i describes the same returned
+    # chunk) and inherently short (one entry per returned chunk, <= retrieve_k).
+    # `source_message_ids` is the provenance union and is capped at the callsite;
+    # the exact, uncapped count already lives in RETRIEVAL_SPAN_MESSAGES.
+    RETRIEVAL_CHUNK_IDS = "lab.retrieval.chunk_ids"
+    RETRIEVAL_CHUNK_KINDS = "lab.retrieval.chunk_kinds"
+    RETRIEVAL_SOURCE_MESSAGE_IDS = "lab.retrieval.source_message_ids"
+
     WEBSEARCH_PROVIDER = "lab.websearch.provider"
     WEBSEARCH_PROVIDER_REQUESTED = "lab.websearch.provider_requested"
     WEBSEARCH_RESULTS = "lab.websearch.results"

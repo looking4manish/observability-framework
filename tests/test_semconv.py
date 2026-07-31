@@ -68,7 +68,9 @@ def test_known_attributes_survived_the_rename():
 
 
 def test_app_attribute_count_matches_source():
-    """65 attributes came across from otel_semconv.py, plus TENANT_ID added here."""
+    """65 attributes came across from otel_semconv.py, plus TENANT_ID added here,
+    plus 3 retrieval-identity attributes (chunk_ids / chunk_kinds /
+    source_message_ids) added to name WHICH chunks a retrieval returned = 69."""
     names = {v for k, v in vars(obskit.App).items()
              if not k.startswith("_") and isinstance(v, str)}
-    assert len(names) == 66, f"expected 66 unique app attributes, got {len(names)}"
+    assert len(names) == 69, f"expected 69 unique app attributes, got {len(names)}"
