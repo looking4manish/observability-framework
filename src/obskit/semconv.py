@@ -364,6 +364,17 @@ class App:
     # from a user who never says anything about themselves.
     PROFILE_EXTRACT_PARSE_FAILED = "lab.profile.extract.parse_failed"
 
+    # --- destructive message edit ------------------------------------------
+    # Editing an earlier turn deletes every message after it AND retires the
+    # memory those messages produced. Both halves have to be visible: a delete
+    # that skipped the memory would leave the model asserting facts whose source
+    # no longer exists, which is unfalsifiable from the outside.
+    EDIT_MESSAGES_DELETED = "lab.edit.messages_deleted"
+    EDIT_CHUNKS_RETIRED = "lab.edit.chunks_retired"
+    EDIT_PROFILE_SUPERSEDED = "lab.edit.profile_superseded"
+    EDIT_CHUNKS_KEPT_PARTIAL = "lab.edit.chunks_kept_partial"
+    EDIT_SUMMARY_RESET = "lab.edit.summary_reset"
+
     WEBSEARCH_PROVIDER = "lab.websearch.provider"
     WEBSEARCH_PROVIDER_REQUESTED = "lab.websearch.provider_requested"
     WEBSEARCH_RESULTS = "lab.websearch.results"

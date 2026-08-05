@@ -73,10 +73,11 @@ def test_app_attribute_count_matches_source():
     source_message_ids) added to name WHICH chunks a retrieval returned = 69,
     plus 5 per-tier retrieval-budget attributes (tier.profile / tier.episodic /
     tier.semantic / budget / budget_backfilled) = 74, plus 11 durable-profile
-    attributes (5 injection + 6 extraction) = 85."""
+    attributes (5 injection + 6 extraction) = 85, plus 5 destructive-edit
+    attributes = 90."""
     names = {v for k, v in vars(obskit.App).items()
              if not k.startswith("_") and isinstance(v, str)}
-    assert len(names) == 85, f"expected 85 unique app attributes, got {len(names)}"
+    assert len(names) == 90, f"expected 90 unique app attributes, got {len(names)}"
 
 
 def test_profile_attributes_are_namespaced_and_distinct():

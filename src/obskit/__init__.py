@@ -41,7 +41,7 @@ from .tracing import (NULL_SPAN, ServiceIdentityError, adopt_root, bind_request,
 from . import metrics
 from .metrics import setup_metrics
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 
 def metrics_status() -> dict:
