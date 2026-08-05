@@ -330,6 +330,40 @@ class App:
     # exactly what an unbudgeted retrieval would have produced.
     RETRIEVAL_BUDGET_BACKFILLED = "lab.retrieval.budget_backfilled"
 
+    # --- durable per-user profile memory ----------------------------------
+    # Profile facts are INJECTED WHOLESALE into the system prompt rather than
+    # retrieved, because similarity is the wrong instrument for them: the model
+    # needs to know the user is vegetarian during a conversation about
+    # Kubernetes, and no vector search will surface that. Injection is
+    # unconditional, so its cost is paid on every turn and has to be visible.
+    #
+    # available vs injected is the pair that matters. They are equal until a user
+    # crosses the cap; after that the difference is `overflow`, which falls back
+    # to ordinary retrieval and can therefore silently fail to appear. A rising
+    # overflow is the signal to raise the cap or to prune.
+    PROFILE_AVAILABLE = "lab.profile.available"
+    PROFILE_INJECTED = "lab.profile.injected"
+    PROFILE_INJECTED_TOKENS = "lab.profile.injected_tokens"
+    PROFILE_CAPPED = "lab.profile.capped"
+    PROFILE_OVERFLOW = "lab.profile.overflow"
+
+    # --- automatic extraction ---------------------------------------------
+    # Extraction runs after every turn, off the request path, and decides what is
+    # durable. Its failure modes are quiet in both directions: extracting nothing
+    # forever looks identical to a user who says nothing personal, and extracting
+    # everything fills the prompt with task noise that then gets injected on every
+    # future turn. `candidates` (what the model proposed) against `written` (what
+    # survived dedup and supersession) is what separates the two.
+    PROFILE_EXTRACT_CANDIDATES = "lab.profile.extract.candidates"
+    PROFILE_EXTRACT_WRITTEN = "lab.profile.extract.written"
+    PROFILE_EXTRACT_DUPLICATES = "lab.profile.extract.duplicates"
+    PROFILE_EXTRACT_SUPERSEDED = "lab.profile.extract.superseded"
+    PROFILE_EXTRACT_MODEL = "lab.profile.extract.model"
+    # The model returned something that was not usable JSON. Must never raise, so
+    # without this attribute a permanently broken extractor is indistinguishable
+    # from a user who never says anything about themselves.
+    PROFILE_EXTRACT_PARSE_FAILED = "lab.profile.extract.parse_failed"
+
     WEBSEARCH_PROVIDER = "lab.websearch.provider"
     WEBSEARCH_PROVIDER_REQUESTED = "lab.websearch.provider_requested"
     WEBSEARCH_RESULTS = "lab.websearch.results"

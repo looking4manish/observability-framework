@@ -72,10 +72,30 @@ def test_app_attribute_count_matches_source():
     plus 3 retrieval-identity attributes (chunk_ids / chunk_kinds /
     source_message_ids) added to name WHICH chunks a retrieval returned = 69,
     plus 5 per-tier retrieval-budget attributes (tier.profile / tier.episodic /
-    tier.semantic / budget / budget_backfilled) = 74."""
+    tier.semantic / budget / budget_backfilled) = 74, plus 11 durable-profile
+    attributes (5 injection + 6 extraction) = 85."""
     names = {v for k, v in vars(obskit.App).items()
              if not k.startswith("_") and isinstance(v, str)}
-    assert len(names) == 74, f"expected 74 unique app attributes, got {len(names)}"
+    assert len(names) == 85, f"expected 85 unique app attributes, got {len(names)}"
+
+
+def test_profile_attributes_are_namespaced_and_distinct():
+    """Profile memory gets its own lab.profile.* namespace.
+
+    It must not be folded into lab.retrieval.*: injected facts are NOT retrieved,
+    and putting them under the retrieval namespace would make
+    lab.retrieval.returned stop meaning "what the vector search returned" — the
+    one number every retrieval dashboard is built on.
+    """
+    profile = {v for k, v in vars(obskit.App).items()
+               if k.startswith("PROFILE_") and isinstance(v, str)}
+    assert len(profile) == 11, f"expected 11 profile attributes, got {len(profile)}"
+    assert all(n.startswith("lab.profile.") for n in profile), sorted(profile)
+    retrieval = {v for k, v in vars(obskit.App).items()
+                 if k.startswith("RETRIEVAL_") and isinstance(v, str)}
+    assert profile & retrieval == set()
+    assert obskit.App.PROFILE_INJECTED == "lab.profile.injected"
+    assert obskit.App.PROFILE_EXTRACT_WRITTEN == "lab.profile.extract.written"
 
 
 def test_tier_budget_attributes_are_distinct_from_kind_counts():
