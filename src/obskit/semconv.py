@@ -364,6 +364,26 @@ class App:
     # from a user who never says anything about themselves.
     PROFILE_EXTRACT_PARSE_FAILED = "lab.profile.extract.parse_failed"
 
+    # --- durability and expiry -------------------------------------------
+    # Extraction used to stamp every automatic fact with the same confidence,
+    # which made it a provenance label rather than a judgement — nothing could
+    # be thresholded on it. These count the DURABILITY verdict instead, which is
+    # a different question: not "how sure are we" but "how long does this stay
+    # true".
+    #
+    # rejected is the one that matters for trust. A memory system that silently
+    # drops what it heard is indistinguishable from one that is broken, so the
+    # count of what was considered and thrown away has to be visible.
+    PROFILE_EXTRACT_DURABLE = "lab.profile.extract.durable"
+    PROFILE_EXTRACT_BOUNDED = "lab.profile.extract.bounded"
+    PROFILE_EXTRACT_REJECTED = "lab.profile.extract.rejected"
+    # Injected facts that carry an expiry, and facts a read-time filter excluded
+    # because they had expired but TTL had not yet swept them. The second is
+    # expected to be small and non-zero: the background remover runs on a period,
+    # not instantly.
+    PROFILE_EXPIRING = "lab.profile.expiring"
+    PROFILE_EXPIRED_FILTERED = "lab.profile.expired_filtered"
+
     # --- destructive message edit ------------------------------------------
     # Editing an earlier turn deletes every message after it AND retires the
     # memory those messages produced. Both halves have to be visible: a delete

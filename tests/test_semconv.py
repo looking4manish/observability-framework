@@ -74,10 +74,10 @@ def test_app_attribute_count_matches_source():
     plus 5 per-tier retrieval-budget attributes (tier.profile / tier.episodic /
     tier.semantic / budget / budget_backfilled) = 74, plus 11 durable-profile
     attributes (5 injection + 6 extraction) = 85, plus 5 destructive-edit
-    attributes = 90."""
+    attributes = 90, plus 5 durability/expiry attributes = 95."""
     names = {v for k, v in vars(obskit.App).items()
              if not k.startswith("_") and isinstance(v, str)}
-    assert len(names) == 90, f"expected 90 unique app attributes, got {len(names)}"
+    assert len(names) == 95, f"expected 90 unique app attributes, got {len(names)}"
 
 
 def test_profile_attributes_are_namespaced_and_distinct():
@@ -90,7 +90,7 @@ def test_profile_attributes_are_namespaced_and_distinct():
     """
     profile = {v for k, v in vars(obskit.App).items()
                if k.startswith("PROFILE_") and isinstance(v, str)}
-    assert len(profile) == 11, f"expected 11 profile attributes, got {len(profile)}"
+    assert len(profile) == 16, f"expected 16 profile attributes, got {len(profile)}"
     assert all(n.startswith("lab.profile.") for n in profile), sorted(profile)
     retrieval = {v for k, v in vars(obskit.App).items()
                  if k.startswith("RETRIEVAL_") and isinstance(v, str)}
