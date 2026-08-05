@@ -70,7 +70,29 @@ def test_known_attributes_survived_the_rename():
 def test_app_attribute_count_matches_source():
     """65 attributes came across from otel_semconv.py, plus TENANT_ID added here,
     plus 3 retrieval-identity attributes (chunk_ids / chunk_kinds /
-    source_message_ids) added to name WHICH chunks a retrieval returned = 69."""
+    source_message_ids) added to name WHICH chunks a retrieval returned = 69,
+    plus 5 per-tier retrieval-budget attributes (tier.profile / tier.episodic /
+    tier.semantic / budget / budget_backfilled) = 74."""
     names = {v for k, v in vars(obskit.App).items()
              if not k.startswith("_") and isinstance(v, str)}
-    assert len(names) == 69, f"expected 69 unique app attributes, got {len(names)}"
+    assert len(names) == 74, f"expected 74 unique app attributes, got {len(names)}"
+
+
+def test_tier_budget_attributes_are_distinct_from_kind_counts():
+    """The tier attributes must not collide with the by-KIND counts beside them.
+
+    They measure different things — from_history sums episodic and raw, which are
+    two different tiers — and two spellings of one idea would give two
+    half-populated series, which is the failure this module exists to prevent.
+    """
+    tier = {obskit.App.RETRIEVAL_TIER_PROFILE,
+            obskit.App.RETRIEVAL_TIER_EPISODIC,
+            obskit.App.RETRIEVAL_TIER_SEMANTIC}
+    kind = {obskit.App.RETRIEVAL_FROM_PROFILE,
+            obskit.App.RETRIEVAL_FROM_HISTORY,
+            obskit.App.RETRIEVAL_FROM_FILES}
+    assert tier & kind == set()
+    assert len(tier) == 3
+    assert obskit.App.RETRIEVAL_TIER_PROFILE == "lab.retrieval.tier.profile"
+    assert obskit.App.RETRIEVAL_BUDGET == "lab.retrieval.budget"
+    assert obskit.App.RETRIEVAL_BUDGET_BACKFILLED == "lab.retrieval.budget_backfilled"

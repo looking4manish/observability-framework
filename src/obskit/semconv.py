@@ -303,6 +303,33 @@ class App:
     RETRIEVAL_CHUNK_KINDS = "lab.retrieval.chunk_kinds"
     RETRIEVAL_SOURCE_MESSAGE_IDS = "lab.retrieval.source_message_ids"
 
+    # --- per-tier retrieval budget ----------------------------------------
+    # A retriever that takes the top k on similarity alone lets a large tier crowd
+    # out a small one: a handful of durable user facts, phrased generally, rank
+    # below hundreds of conversation chunks that share the question's exact
+    # vocabulary. That failure is invisible in every attribute above — candidates,
+    # returned, reranked and top_score all read healthy while the facts the answer
+    # needed were never in the returned set at all.
+    #
+    # These describe the returned set per TIER, which is the unit a budget is
+    # expressed in. They do NOT replace RETRIEVAL_FROM_PROFILE / FROM_HISTORY /
+    # FROM_FILES: those count by chunk KIND and are what existing dashboards are
+    # keyed on. The two disagree deliberately — from_history sums episodic and raw,
+    # which belong to different tiers.
+    RETRIEVAL_TIER_PROFILE = "lab.retrieval.tier.profile"
+    RETRIEVAL_TIER_EPISODIC = "lab.retrieval.tier.episodic"
+    RETRIEVAL_TIER_SEMANTIC = "lab.retrieval.tier.semantic"
+    # The budget actually in force for this retrieval, compactly rendered
+    # ("profile=3,episodic=2,semantic=5,total=10"). Recorded per retrieval rather
+    # than inferred from config, because it is live-tunable and a trace read a week
+    # later has no other way to know what the rules were when it ran.
+    RETRIEVAL_BUDGET = "lab.retrieval.budget"
+    # Slots a tier did not fill, handed back to the general pool. This is the
+    # attribute that shows the budget is not costing recall: for a user with no
+    # profile facts it equals the profile allowance, and the returned set is
+    # exactly what an unbudgeted retrieval would have produced.
+    RETRIEVAL_BUDGET_BACKFILLED = "lab.retrieval.budget_backfilled"
+
     WEBSEARCH_PROVIDER = "lab.websearch.provider"
     WEBSEARCH_PROVIDER_REQUESTED = "lab.websearch.provider_requested"
     WEBSEARCH_RESULTS = "lab.websearch.results"
