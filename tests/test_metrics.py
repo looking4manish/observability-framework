@@ -335,3 +335,86 @@ def test_derive_metrics_endpoint():
     assert metrics._derive_metrics_endpoint(
         "http://c:4318") == "http://c:4318/v1/metrics"
     assert metrics._derive_metrics_endpoint(None) is None
+
+
+# ---------------------------------------------------------------------------
+# record_metric=False — one real model call, one record, whatever the layering
+# ---------------------------------------------------------------------------
+
+def test_suppressed_generation_records_no_metric_but_still_spans(mem):
+    """The wrapper layer must vanish from the histogram and stay in the trace."""
+    tracing.bind_request()
+    with tracing.generation("ollama.chat_stream", model="m", provider="ollama") as sp:
+        sp.set_usage(10, 5)
+    with tracing.generation("chat", model="m", provider="ollama",
+                            record_metric=False) as sp:
+        sp.set_usage(10, 5)
+
+    pts = _points(mem, GenAIMetric.OPERATION_DURATION)
+    assert sum(p.count for p in pts) == 1, "the wrapper must not be counted again"
+    # tokens too: a suppressed span may not re-report the usage its child reported
+    tok = sum(p.count for p in _points(mem, GenAIMetric.TOKEN_USAGE))
+    assert tok == 2, tok  # one input + one output point, from the counted span only
+
+
+def test_suppressed_span_is_still_a_full_generation_in_the_trace(mem):
+    """Suppression is a METRICS decision. The span keeps its type and attributes,
+    or a fix for double counting would quietly cost the trace its generation."""
+    exporter = InMemorySpanExporter()
+    tracing.reset_for_tests()
+    metrics.reset_for_tests()
+    obskit.init(enabled_flag=True, service_name="t", service_namespace="lab",
+                deployment_environment="test", endpoint="",
+                span_processor=SimpleSpanProcessor(exporter))
+    reader = InMemoryMetricReader()
+    obskit.setup_metrics(metric_reader=reader)
+    tracing.bind_request()
+    with tracing.generation("chat", model="m", provider="ollama",
+                            record_metric=False) as sp:
+        sp.set_output("hello")
+    spans = exporter.get_finished_spans()
+    assert len(spans) == 1
+    attrs = dict(spans[0].attributes)
+    assert attrs["langfuse.observation.type"] == ObservationType.GENERATION
+    assert attrs["gen_ai.request.model"] == "m"
+    assert not _points(reader, GenAIMetric.OPERATION_DURATION)
+    metrics.reset_for_tests()
+    tracing.reset_for_tests()
+
+
+def test_suppressed_embedding_records_no_metric(mem):
+    tracing.bind_request()
+    with tracing.embedding("embeddings.embed", model="bge"):
+        with tracing.embedding("ollama.embed", model="bge", record_metric=False):
+            pass
+    pts = _points(mem, GenAIMetric.OPERATION_DURATION)
+    assert sum(p.count for p in pts) == 1
+
+
+def test_record_metric_defaults_to_true(mem):
+    """Nothing changes for an application that never passes the flag."""
+    tracing.bind_request()
+    with tracing.generation("ollama.chat", model="m"):
+        pass
+    with tracing.embedding("ollama.embed", model="bge"):
+        pass
+    assert sum(p.count for p in _points(mem, GenAIMetric.OPERATION_DURATION)) == 2
+
+
+def test_operation_label_separates_background_from_the_users_turn(mem):
+    """The point of the custom GenAIOperation values: a background call must be
+    filterable out of the series the user's turn is measured in."""
+    tracing.bind_request()
+    with tracing.generation("ollama.chat_stream", model="m",
+                            operation=obskit.GenAIOperation.CHAT):
+        pass
+    with tracing.generation("ollama.chat", model="m",
+                            operation=obskit.GenAIOperation.EXTRACT_PROFILE):
+        pass
+    with tracing.generation("ollama.chat", model="m",
+                            operation=obskit.GenAIOperation.GENERATE_TITLE):
+        pass
+    by_op = {}
+    for p in _points(mem, GenAIMetric.OPERATION_DURATION):
+        by_op[dict(p.attributes)[MetricLabel.OPERATION]] = p.count
+    assert by_op == {"chat": 1, "extract_profile": 1, "generate_title": 1}, by_op

@@ -550,6 +550,12 @@ class _Span:
         # read (immune to wall-clock steps) used purely for duration.
         self._metric_t0: float = time.monotonic()
         self._metric_obs_type: str | None = None
+        # Set from `record_metric=False` at creation. The span still renders
+        # exactly as it otherwise would — same observation type, same attributes,
+        # same place in the tree — but obskit.metrics skips it, so a LAYERED path
+        # emits one model-call metric per real model call instead of one per
+        # layer. See generation()'s docstring for when to reach for it.
+        self._metric_suppressed: bool = False
         self._metric_route: str | None = None
         self._metric_model: str | None = None
         self._metric_operation: str | None = None
@@ -789,7 +795,7 @@ def _parent_context(parent):
 
 def _start(name: str, *, observation_type: str, parent=None, start_time=None,
            input=None, metadata=None, model=None, model_parameters=None,
-           attributes: dict | None = None):
+           attributes: dict | None = None, record_metric: bool = True):
     """Create a span. Returns NULL_SPAN if tracing is off or creation failed."""
     if not enabled():
         return NULL_SPAN
@@ -799,6 +805,7 @@ def _start(name: str, *, observation_type: str, parent=None, start_time=None,
         )
         h = _Span(raw)
         h._metric_obs_type = observation_type
+        h._metric_suppressed = not record_metric
         h.set_attribute(Langfuse.OBSERVATION_TYPE, observation_type)
         rid = _request_id_var.get()
         if rid:
@@ -874,12 +881,40 @@ def span(name: str, *, observation_type: str = ObservationType.SPAN, parent=None
 def generation(name: str, *, model: str | None = None, parent=None, input=None,
                model_parameters: dict | None = None, metadata: dict | None = None,
                operation: str = "chat", provider: str | None = None,
-               attributes: dict | None = None, start_time=None):
+               attributes: dict | None = None, start_time=None,
+               record_metric: bool = True):
     """A model call. Renders as a Langfuse generation with model + token usage.
 
     `provider` has no default: this package does not know which vendor an
     application talks to. When omitted, gen_ai.provider.name / gen_ai.system are
     simply not set rather than being set to something untrue.
+
+    `operation` is the value of gen_ai.operation.name, which is ALSO a metric
+    label — so it is what separates one kind of model call from another on a
+    dashboard. Background work (summarisation, fact extraction, auto-titling)
+    must not share the series the user's own turn is measured in, or the
+    latency a user waits for cannot be read off the chart. See GenAIOperation
+    for the well-known values and for the rule on custom ones.
+
+    `record_metric=False` keeps the span exactly as it is in the trace but stops
+    it emitting gen_ai.client.operation.duration (and the token / TTFT
+    histograms). It exists for LAYERED paths, where more than one span describes
+    the SAME model call:
+
+        turn-level generation  <- the app's own summary of the turn
+            ollama.chat_stream <- the span that actually made the HTTP call
+
+    Both are legitimately generations and both belong in the trace, but the
+    histogram must count the call once. Set record_metric=False on whichever
+    layer is not the metric owner and leave the other alone. Choose the owner by
+    asking which span is present on EVERY path that makes this call: a wrapper
+    that only some paths open is the wrong owner, because the paths without it
+    would then record nothing.
+
+    Nesting is deliberately NOT auto-detected. Wrapper and call are often
+    siblings rather than ancestor and descendant (an app that back-dates a
+    summary span's start_time after streaming finishes produces exactly that),
+    so there is no ancestry to inspect — the honest signal is the explicit one.
     """
     attrs = {GenAI.OPERATION_NAME: operation, **(attributes or {})}
     if provider:
@@ -888,21 +923,26 @@ def generation(name: str, *, model: str | None = None, parent=None, input=None,
     with _managed(_start(name, observation_type=ObservationType.GENERATION, parent=parent,
                          start_time=start_time, input=input, metadata=metadata,
                          model=model, model_parameters=model_parameters,
-                         attributes=attrs)) as h:
+                         attributes=attrs, record_metric=record_metric)) as h:
         yield h
 
 
 @contextmanager
 def embedding(name: str, *, model: str | None = None, parent=None, input=None,
               metadata: dict | None = None, attributes: dict | None = None,
-              provider: str | None = None):
-    """An embedding call — its own Langfuse observation type."""
+              provider: str | None = None, record_metric: bool = True):
+    """An embedding call — its own Langfuse observation type.
+
+    `record_metric` behaves exactly as it does on generation(): an embedder with
+    a fast path and a fallback opens one span for the logical call and another
+    for the backend that answered it, and only one of them may count.
+    """
     attrs = {GenAI.OPERATION_NAME: "embeddings", **(attributes or {})}
     if provider:
         attrs.setdefault(GenAI.PROVIDER_NAME, provider)
     with _managed(_start(name, observation_type=ObservationType.EMBEDDING, parent=parent,
                          input=input, metadata=metadata, model=model,
-                         attributes=attrs)) as h:
+                         attributes=attrs, record_metric=record_metric)) as h:
         yield h
 
 

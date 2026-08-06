@@ -601,8 +601,15 @@ def on_span_end(handle) -> None:
     generation/embedding -> gen_ai.client.operation.duration (+ tokens, TTFT for
     generations); retriever -> lab.retrieval.duration. Everything else records
     nothing. Inert unless setup_metrics() has run.
+
+    A span created with `record_metric=False` is skipped entirely: it is a second
+    description of a model call another span already counted, and counting it
+    again inflates the call count and halves the apparent latency of every turn.
+    See tracing.generation().
     """
     if not _enabled or handle is None:
+        return
+    if getattr(handle, "_metric_suppressed", False):
         return
     try:
         ot = getattr(handle, "_metric_obs_type", None)

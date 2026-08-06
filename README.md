@@ -256,6 +256,60 @@ instrument), matching the shape of stable `http.server.request.duration`. These
 metric-name literals are pinned and re-declared exactly like the `gen_ai.*`
 attribute strings, and `verify_against_upstream()` now checks them too.
 
+### One real model call, one record (0.9.0)
+
+`gen_ai.client.operation.duration` is recorded on **every** closing span whose
+observation type is `generation` or `embedding` (`metrics.on_span_end`). Its
+`_count` series is therefore the model-call count, and its `_sum / _count` is the
+mean model-call latency — both of which are wrong by a whole multiple the moment
+two spans describe the *same* call.
+
+That is not hypothetical. An application typically has a **layered** path:
+
+    turn-level generation        the app's own summary of the turn
+        ollama.chat_stream       the span that actually made the HTTP call
+
+Both are legitimately generations and both belong in the trace. Left alone they
+record twice, so the call count doubles and the mean latency reads about half of
+the truth. Adding a background model call (fact extraction, auto-titling)
+multiplies it again — the adopting application measured **3–4 records per user
+turn** before this was fixed.
+
+Two rules close it, and they are separate:
+
+**(a) Exactly one span per real call records.** Pass `record_metric=False` to
+`generation()` / `embedding()` on the layer that is *not* the metric owner. The
+span is unchanged in the trace — same observation type, same attributes, same
+position — it simply stops emitting the operation, token and TTFT histograms.
+
+Choose the owner by asking **which span is present on every path that makes this
+call**. A wrapper only some paths open is the wrong owner, because the paths
+without it would then record nothing: an application that suppressed the
+low-level call span and kept a turn-level wrapper found that its agent loop —
+four real model calls under one turn — collapsed to one record. **Under-counting
+is exactly as wrong as over-counting**, and it is harder to notice.
+
+Nesting is deliberately **not** auto-detected. Wrapper and call are often
+siblings rather than ancestor and descendant (back-dating a summary span's
+`start_time` after streaming finishes produces precisely that shape), so there is
+no ancestry to inspect. The explicit flag is the honest signal.
+
+**(b) Background work does not share the user's series.** `gen_ai.operation.name`
+is an open enum *and* a metric label (`MetricLabel.OPERATION`), so it is the
+dimension that separates kinds of model call on a chart. A summariser or fact
+extractor labelled `chat` lands in the same series as the turn the user waited
+for, and no filter can separate them afterwards. `GenAIOperation` declares the
+four OTel well-known values plus the background ones this vocabulary has needed
+(`extract_profile`, `judge_fact`, `generate_title`, `summarize`,
+`contextualize`, `caption`). Keep them few — each distinct value is a time series.
+
+Note that (b) is a value on a standard attribute, not a rename of one: working
+rule 4 is intact.
+
+**Changing this changes your numbers.** Counts and latencies recorded before and
+after a de-duplication are not comparable — the step change is the fix landing,
+not a regression. Say so wherever the numbers are read.
+
 ### Histogram buckets
 
 A histogram is only as useful as its bucket boundaries, and until 0.4.0 the five
@@ -763,6 +817,14 @@ not on intent.
    Pass `provider=` explicitly on `generation()` and `embedding()` — there is no
    default, and when omitted `gen_ai.provider.name` is simply not set rather than
    set to something untrue.
+
+   Then audit the layering **once**: list every span in your application whose
+   observation type is `generation` or `embedding`, and for each real model call
+   count how many of them describe it. If the answer is ever more than one, mark
+   all but the owner `record_metric=False`, and give background calls their own
+   `GenAIOperation` value — see [One real model call, one
+   record](#one-real-model-call-one-record-090). Nothing fails if you skip this;
+   the numbers are just quietly a multiple of the truth.
 
 9. **Call `shutdown()` on process stop.** Spans are exported by a background
    thread; without it a restart drops whatever was still queued. The one

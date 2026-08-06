@@ -69,12 +69,41 @@ class GenAI:
 
 
 class GenAIOperation:
-    """Values for GenAI.OPERATION_NAME."""
+    """Values for GenAI.OPERATION_NAME.
 
+    gen_ai.operation.name is an OPEN enum: the convention lists well-known values
+    and permits a custom one where none of them fits. That matters more here than
+    it looks, because this attribute is also a METRIC LABEL
+    (MetricLabel.OPERATION) — it is the dimension that separates one kind of model
+    call from another on a latency chart.
+
+    Hence the rule for applications: a model call the USER WAITS FOR and a model
+    call that runs in the BACKGROUND must not share an operation value. They are
+    the same API operation ("chat") and completely different measurements. Merged
+    into one series, a slow background summariser inflates the figure everyone
+    reads as the user's experience, and no dashboard filter can separate them
+    again afterwards.
+
+    The four standard values below are OTel's. The rest are the background
+    operations this vocabulary has needed so far. They are declared here rather
+    than typed at a callsite for the same reason every attribute string is
+    (working rule 3), and they are deliberately few and low-cardinality — each
+    distinct value is another time series.
+    """
+
+    # OTel well-known values.
     CHAT = "chat"
     EMBEDDINGS = "embeddings"
     EXECUTE_TOOL = "execute_tool"
     INVOKE_AGENT = "invoke_agent"
+
+    # Custom values: model calls that run off the user's critical path.
+    EXTRACT_PROFILE = "extract_profile"   # learn durable facts from a finished turn
+    JUDGE_FACT = "judge_fact"             # duplicate/supersede adjudication
+    GENERATE_TITLE = "generate_title"     # name a conversation from its first exchange
+    SUMMARIZE = "summarize"               # compress evicted history
+    CONTEXTUALIZE = "contextualize"       # rewrite a follow-up into a standalone query
+    CAPTION = "caption"                   # describe a non-text asset (video frame)
 
 
 class GenAIMetric:
